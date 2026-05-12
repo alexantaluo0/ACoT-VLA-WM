@@ -39,7 +39,8 @@ def make_attn_mask(input_mask, mask_ar):
         it and false where it shares the same attention mask as the previous token.
     """
     mask_ar = jnp.broadcast_to(mask_ar, input_mask.shape)
-    cumsum = jnp.cumsum(mask_ar, axis=1)
+    # Use float32 cumsum to avoid bool/int cumsum JVP failures on some XLA+GPU combos.
+    cumsum = jnp.cumsum(mask_ar.astype(jnp.float32), axis=1)
     attn_mask = cumsum[:, None, :] <= cumsum[:, :, None]
     valid_mask = input_mask[:, None, :] * input_mask[:, :, None]
     return jnp.logical_and(attn_mask, valid_mask)
@@ -308,7 +309,7 @@ class Pi0(_model.BaseModel):
         input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
         ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
         attn_mask = make_attn_mask(input_mask, ar_mask)
-        positions = jnp.cumsum(input_mask, axis=1) - 1
+        positions = jnp.asarray(jnp.cumsum(input_mask.astype(jnp.float32), axis=1) - 1.0, dtype=jnp.int32)
         (prefix_out, suffix_out), _ = self.PaliGemma.llm(
             [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
         )
@@ -334,7 +335,7 @@ class Pi0(_model.BaseModel):
         # first fill KV cache with a forward pass of the prefix
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
-        positions = jnp.cumsum(prefix_mask, axis=1) - 1
+        positions = jnp.asarray(jnp.cumsum(prefix_mask.astype(jnp.float32), axis=1) - 1.0, dtype=jnp.int32)
         _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
 
         def step(carry):
@@ -357,7 +358,12 @@ class Pi0(_model.BaseModel):
                 prefix_tokens.shape[1] + suffix_tokens.shape[1],
             )
             # `positions` is shape (b, suffix_len) indicating the positions of the suffix tokens
-            positions = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
+            positions = jnp.asarray(
+                jnp.sum(prefix_mask.astype(jnp.float32), axis=-1)[:, None]
+                + jnp.cumsum(suffix_mask.astype(jnp.float32), axis=-1)
+                - 1.0,
+                dtype=jnp.int32,
+            )
 
             (prefix_out, suffix_out), _ = self.PaliGemma.llm(
                 [None, suffix_tokens],

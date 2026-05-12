@@ -145,3 +145,58 @@ def load(directory: pathlib.Path | str) -> dict[str, NormStats]:
     if not path.exists():
         raise FileNotFoundError(f"Norm stats file not found at: {path}")
     return deserialize_json(path.read_text())
+
+
+def align_norm_stats_to_model_dim(
+    norm_stats: dict[str, NormStats],
+    *,
+    model_action_dim: int,
+    robot_action_dim: int | None = None,
+) -> dict[str, NormStats]:
+    """Pad or trim norm stats so each vector length matches ``model_action_dim``.
+
+    Training uses tensors padded to ``model_action_dim`` (e.g. 32) while only the first
+    ``robot_action_dim`` joints carry real data. For indices ``[robot_action_dim:]`` this sets
+    identity normalization (mean 0, std 1, and quantiles -1 / 1) so padded channels do not
+    inherit spurious variance from zeros.
+
+    Args:
+        norm_stats: Mapping such as ``state``, ``actions``, ``coarse_actions``.
+        model_action_dim: Target trailing dimension (typically ``model_config.action_dim``).
+        robot_action_dim: First index treated as padding for identity stats; ``None`` skips that step.
+    """
+    out: dict[str, NormStats] = {}
+    for key, ns in norm_stats.items():
+        mean = np.asarray(ns.mean, dtype=np.float64).reshape(-1)
+        std = np.asarray(ns.std, dtype=np.float64).reshape(-1)
+        q01 = None if ns.q01 is None else np.asarray(ns.q01, dtype=np.float64).reshape(-1)
+        q99 = None if ns.q99 is None else np.asarray(ns.q99, dtype=np.float64).reshape(-1)
+
+        d = mean.size
+        if d < model_action_dim:
+            pad_w = model_action_dim - d
+            mean = np.pad(mean, (0, pad_w), constant_values=0.0)
+            std = np.pad(std, (0, pad_w), constant_values=1.0)
+            if q01 is not None and q99 is not None:
+                q01 = np.pad(q01, (0, pad_w), constant_values=-1.0)
+                q99 = np.pad(q99, (0, pad_w), constant_values=1.0)
+        elif d > model_action_dim:
+            mean = mean[:model_action_dim].copy()
+            std = std[:model_action_dim].copy()
+            if q01 is not None and q99 is not None:
+                q01 = q01[:model_action_dim].copy()
+                q99 = q99[:model_action_dim].copy()
+
+        if robot_action_dim is not None and robot_action_dim < model_action_dim:
+            mean = mean.copy()
+            std = std.copy()
+            mean[robot_action_dim:] = 0.0
+            std[robot_action_dim:] = 1.0
+            if q01 is not None and q99 is not None:
+                q01 = q01.copy()
+                q99 = q99.copy()
+                q01[robot_action_dim:] = -1.0
+                q99[robot_action_dim:] = 1.0
+
+        out[key] = NormStats(mean=mean, std=std, q01=q01, q99=q99)
+    return out

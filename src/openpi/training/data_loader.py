@@ -187,6 +187,7 @@ def create_torch_dataset(
         dataset_metas = [
             lerobot_dataset.LeRobotDatasetMetadata(r) for r in repo_id
         ]
+        tol = float(data_config.video_tolerance_s)
         dataset = lerobot_dataset.MultiLeRobotDataset(
             repo_id,
             delta_timestamps={
@@ -194,6 +195,7 @@ def create_torch_dataset(
                 for dataset_meta in dataset_metas
                 for key in data_config.action_sequence_keys
             },
+            tolerances_s={r: tol for r in repo_id},
         )
         if data_config.prompt_from_task:
             for n, d in enumerate(dataset._datasets):
@@ -216,6 +218,7 @@ def create_torch_dataset(
                 key: [t / dataset_meta.fps for t in range(action_chunk_size)]
                 for key in data_config.action_sequence_keys
             },
+            tolerance_s=float(data_config.video_tolerance_s),
         )
 
         if data_config.prompt_from_task:
@@ -503,6 +506,8 @@ class TorchDataLoader:
                     batch = next(data_iter)
                 except StopIteration:
                     break  # We've exhausted the dataset. Create a new iterator and start over.
+                if batch is None:
+                    continue
                 num_items += 1
                 yield jax.tree.map(lambda x: jax.make_array_from_process_local_data(self._sharding, x), batch)
 
@@ -512,6 +517,8 @@ def _collate_fn(items):
     # Make sure to convert to numpy arrays before stacking since some of the incoming elements
     # may be JAX arrays.
     filter_items = [x for x in items if x is not None]
+    if len(filter_items) != len(items):
+        return None
     # return jax.tree.map(lambda *x: np.stack(np.asarray(x), axis=0), *filter_items)
 
     def debug_stack(*args):

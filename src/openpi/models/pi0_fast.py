@@ -41,7 +41,8 @@ def make_attn_mask(input_mask, mask_ar):
         it and false where it shares the same attention mask as the previous token.
     """
     mask_ar = jnp.broadcast_to(mask_ar, input_mask.shape)
-    cumsum = jnp.cumsum(mask_ar, axis=1)
+    # Use float32 cumsum to avoid bool/int cumsum JVP failures on some XLA+GPU combos.
+    cumsum = jnp.cumsum(mask_ar.astype(jnp.float32), axis=1)
     attn_mask = cumsum[:, None, :] <= cumsum[:, :, None]
     valid_mask = input_mask[:, None, :] * input_mask[:, :, None]
     return jnp.logical_and(attn_mask, valid_mask)
@@ -255,7 +256,7 @@ class Pi0FAST(_model.BaseModel):
         # first fill KV cache with a forward pass of the prefix
         # pad attention mask to set the size of the KV cache (prefill_size + max_decoding_steps)
         prefix_attn_mask = jnp.pad(prefix_attn_mask, ((0, 0), (0, 0), (0, max_decoding_steps)))
-        prefix_positions = jnp.cumsum(prefix_mask, axis=-1) - 1
+        prefix_positions = jnp.asarray(jnp.cumsum(prefix_mask.astype(jnp.float32), axis=-1) - 1.0, dtype=jnp.int32)
         prefix_logits, kv_cache, _ = self.PaliGemma.llm(
             embedded_prefix=prefix_token_embeddings, mask=prefix_attn_mask, positions=prefix_positions, decode=True
         )

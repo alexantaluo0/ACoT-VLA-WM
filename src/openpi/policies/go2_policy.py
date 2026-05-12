@@ -131,8 +131,17 @@ class Go2ACOTInputs(transforms.DataTransformFn):
             data["state"] = data["state"][state_indices]
 
         if "actions" in data:
-            assert data["actions"].shape[1] == 40
-            data["actions"] = np.column_stack((data["actions"][:, 16:30], data["actions"][:, 0:2], data["actions"][:, 33:38]))
+            n_a = data["actions"].shape[1]
+            if n_a == 40:
+                # Legacy AgiBot-style flat action: arms + grippers + partial torso indices.
+                data["actions"] = np.column_stack(
+                    (data["actions"][:, 16:30], data["actions"][:, 0:2], data["actions"][:, 33:38])
+                )
+            elif n_a in (21, 24):
+                # Already ordered (e.g. 21-dim legacy stack, or 24-dim full-body joint order).
+                pass
+            else:
+                raise ValueError(f"Go2ACOTInputs: unsupported action width {n_a}, expected 40, 24, or 21.")
         return data
     
     def random_inject_prompt(self, data):
@@ -238,6 +247,9 @@ class Go2ACOTInputs(transforms.DataTransformFn):
 class Go2ACOTOutputs(transforms.DataTransformFn):
     """Outputs for the Go2 policy."""
 
+    # Truncate model outputs (padded to action_dim) to the robot command dimension.
+    robot_action_dim: int = 21
+
     def __call__(self, data: dict) -> dict:
         keys = ['coarse_actions', 'actions']
-        return {key: np.asarray(data[key][:, :21]) for key in keys if key in data}
+        return {key: np.asarray(data[key][:, : self.robot_action_dim]) for key in keys if key in data}

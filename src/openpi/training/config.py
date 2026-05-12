@@ -98,6 +98,9 @@ class DataConfig:
     prompt_from_hl_instruction: bool = False
 
     dataloader_sampler: str | None = ''
+    # LeRobot video timestamp matching tolerance. Some converted datasets have frame timestamps
+    # quantized by one video frame (for example 1 / 30s).
+    video_tolerance_s: float = 1e-4
 
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
@@ -629,6 +632,9 @@ class LerobotACOTGo2DataConfig(DataConfigFactory):
         default_factory=lambda: {}
     )
 
+    # Robot command width after preprocessing (before pad to model action_dim). Legacy datasets: 21.
+    robot_action_dim: int = 21
+
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         # Create data transforms for inputs and outputs
@@ -640,7 +646,7 @@ class LerobotACOTGo2DataConfig(DataConfigFactory):
                 prompt_map_inject_to_training = self.prompt_map_inject_to_training,
                 acot_action_generation=((model_config.coarse_action_horizon, model_config.action_horizon), self.joint_action_shifts))
             ],
-            outputs=[go2_policy.Go2ACOTOutputs()],
+            outputs=[go2_policy.Go2ACOTOutputs(robot_action_dim=self.robot_action_dim)],
         )
 
         # Apply delta action transform if enabled
@@ -1679,7 +1685,12 @@ _CONFIGS = [
         data=LerobotACOTGo1DataConfig(
             repo_id="/mnt/public/zhonglinqing/data/datasets/lerobot_dataset/random_pick_3124_3136",
             default_prompt="pick up the item on the table use your arm.",
-            base_config=DataConfig(dataloader_sampler="subtask", prompt_from_hl_instruction=True),
+            base_config=DataConfig(
+                dataloader_sampler="subtask",
+                prompt_from_hl_instruction=True,
+                # Video timestamps are quantized by about one 30-FPS frame in this converted dataset.
+                video_tolerance_s=0.05,
+            ),
             extra_delta_transform=(False, False),
             joint_action_shifts=(2, 1),
             repack_transforms =_transforms.Group(
@@ -1775,7 +1786,12 @@ _CONFIGS = [
         data=LerobotACOTAgilexDataConfig(
             repo_id="/mnt/public/zhonglinqing/data/datasets/lerobot_dataset/agilex_random_pick/merge",
             default_prompt="pick up the item on the table use your arm.",
-            base_config=DataConfig(dataloader_sampler="subtask", prompt_from_hl_instruction=True),
+            base_config=DataConfig(
+                dataloader_sampler="subtask",
+                prompt_from_hl_instruction=True,
+                # Converted videos can differ from requested timestamps by one 30-FPS frame.
+                video_tolerance_s=0.05,
+            ),
             extra_delta_transform=(False, False),
             joint_action_shifts=(2, 1),
             repack_transforms =_transforms.Group(
@@ -1936,7 +1952,88 @@ _CONFIGS = [
         freeze_filter = acot_vla.ACOTConfig(paligemma_variant="gemma_2b_lora").get_freeze_filter(
             freeze_vision = False, freeze_llm = True, freeze_llm_embedder=True, freeze_dual_ae=[False, False]
         )
-    )
+    ),
+    TrainConfig(
+        name="place_block_into_box",
+        model=acot_vla.ACOTConfig(
+            coarse_action_horizon=30,
+            action_horizon=30,
+            paligemma_variant="gemma_2b",
+            adopt_explicit_action_reasoner=True,
+            adopt_implicit_action_reasoner=True,
+            downsample_based_implicit_extractor=True,
+        ),
+        data=LerobotACOTGo2DataConfig(
+            default_prompt="Pick up the block and place it into the box.",
+            # Replace with your LeRobot dataset root (local path or HF repo id).
+            repo_id="/data/dataset/Robotdataset/Robotdataset/AgiBot_World/AgiBotWorldChallenge-2026/Reasoning2Action-Sim/place_block_into_box_nodepth",
+            assets=AssetsConfig(
+                assets_dir=None,
+                # Norm stats from scripts/compute_norm_stats.py; falls back to repo_id if asset_id is None.
+                asset_id="/data/luogz/code/ACoT-VLA/assets/place_block_into_box",
+            ),
+            prompt_map_inject_to_training={
+                # Keys must match task names in dataset meta (same convention as ICRA block task).
+                "Insert building block holes_2_SIM": (
+                    "Pick up the yellow circular block from the table, "
+                    "and place it into the round hole of the block box",
+                    0.2,
+                ),
+            },
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "top_head": "observation.images.top_head",
+                                "hand_left": "observation.images.hand_left",
+                                "hand_right": "observation.images.hand_right",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "prompt",
+                            "task": "task",
+                            "episode_index": "episode_index",
+                        }
+                    )
+                ]
+            ),
+            base_config=DataConfig(
+                dataloader_sampler="subtask",
+                prompt_from_hl_instruction=True,
+                video_tolerance_s=5,
+            ),
+            joint_action_shifts=(2, 1),
+            extra_delta_transform=(True, True),
+            # 24-dim action order: arm_l x7, arm_r x7, gripper_l/r, head x3, waist x5; model still uses action_dim=32.
+            robot_action_dim=24,
+            state_mask=_transforms.make_bool_mask(-24, 8),
+            action_mask=_transforms.make_bool_mask(-24, 8),
+            # First 14 dims (two 7-DoF arms) use delta; grippers, head, waist (and pad) use absolute.
+            delta_action_mask=_transforms.make_bool_mask(14, -18),
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.ACOTCheckpointWeightLoader(
+            "/data/luogz/models/openpi-assets/checkpoints/pi05_base/params"
+        ),
+        num_train_steps=50_000,
+        save_interval=5000 if not os.getenv("DEBUG_MODE", default=False) == "true" else 200,
+        num_workers=24 if not os.getenv("DEBUG_MODE", default=False) == "true" else 1,
+        batch_size=256 if not os.getenv("DEBUG_MODE", default=False) == "true" else 16,
+        freeze_filter=acot_vla.ACOTConfig(paligemma_variant="gemma_2b").get_freeze_filter(
+            freeze_vision=False,
+            freeze_llm=True,
+            freeze_llm_embedder=True,
+            freeze_dual_ae=[False, False],
+        ),
+    ),
 ]
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):

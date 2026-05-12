@@ -37,6 +37,8 @@ dependencies = [
     "transformers==4.48.1",
     "rich>=14.0.0",
     "polars>=1.30.0",
+    "huggingface-hub[cli]>=0.32.3",
+    "hf-transfer>=0.1.9",
 ]
 
 
@@ -60,7 +62,7 @@ rlds = [
 ]
 
 [tool.uv]
-override-dependencies = ["ml-dtypes==0.4.1", "tensorstore==0.1.74"]
+override-dependencies = ["ml-dtypes==0.4.1", "tensorstore==0.1.74", "av==13.1.0"]
 
 [tool.uv.sources]
 openpi-client = { workspace = true }

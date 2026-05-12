@@ -19,6 +19,15 @@ import openpi.shared.nnx_utils as nnx_utils
 logger = logging.getLogger("ACoT_VLA")
 
 
+def _positions_from_attn_mask(mask: jax.Array) -> jax.Array:
+    """RoPE positions from a boolean (or 0/1) token mask.
+
+    ``jnp.cumsum`` on bool/int triggers a fragile JVP on some XLA builds (e.g. ``ReshapeIsBitcast`` on newer NVIDIA
+    GPUs). Cumulating in float32 then casting to ``int32`` matches integer positions and avoids that failure.
+    """
+    return jnp.asarray(jnp.cumsum(mask.astype(jnp.float32), axis=-1) - 1.0, dtype=jnp.int32)
+
+
 class MLP(nnx.Module):
     def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, *, activate: bool = True, rngs: nnx.Rngs, param_dtype=jnp.float32):
         self.fc1 = nnx.Linear(input_dim, hidden_dim, rngs=rngs, param_dtype=param_dtype)
@@ -722,7 +731,7 @@ class ACOT_VLA(_model.BaseModel):
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
 
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
-        positions_prefix = jnp.cumsum(prefix_mask, axis=1) - 1
+        positions_prefix = _positions_from_attn_mask(prefix_mask)
         _, kv_cache = self.PaliGemma.llm([prefix_tokens, None, None], mask=prefix_attn_mask, positions=positions_prefix)
 
         if self.adopt_explicit_action_reasoner:
@@ -732,7 +741,7 @@ class ACOT_VLA(_model.BaseModel):
             input_mask = jnp.concatenate([prefix_mask, suffix_ref_action_mask], axis=1)
             ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ref_action_ar_mask], axis=0)
             attn_mask = make_attn_mask(input_mask, ar_mask)
-            positions = jnp.cumsum(input_mask, axis=1) - 1
+            positions = _positions_from_attn_mask(input_mask)
 
             (prefix_ref_action_out, suffix_ref_action_out, _), _ = self.PaliGemma.llm(
                 [prefix_tokens, suffix_ref_action_tokens, None],
@@ -766,7 +775,7 @@ class ACOT_VLA(_model.BaseModel):
         input_mask = jnp.concatenate([prefix_mask, suffix_expert_mask], axis=1)
         ar_mask = jnp.concatenate([prefix_ar_mask, suffix_expert_ar_mask], axis=0)
         attn_mask = make_attn_mask(input_mask, ar_mask)
-        positions = jnp.cumsum(input_mask, axis=1) - 1
+        positions = _positions_from_attn_mask(input_mask)
 
         (prefix_expert_out, _, suffix_expert_out), _ = self.PaliGemma.llm(
             [prefix_tokens, None, suffix_expert_tokens],
@@ -812,7 +821,7 @@ class ACOT_VLA(_model.BaseModel):
         # first fill KV cache with a forward pass of the prefix
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
-        positions = jnp.cumsum(prefix_mask, axis=1) - 1
+        positions = _positions_from_attn_mask(prefix_mask)
         _, kv_cache = self.PaliGemma.llm([prefix_tokens, None, None], mask=prefix_attn_mask, positions=positions)
 
         if self.adopt_implicit_action_reasoner:
@@ -837,7 +846,12 @@ class ACOT_VLA(_model.BaseModel):
                 suffix_tokens.shape[1],
                 prefix_tokens.shape[1] + suffix_tokens.shape[1],
             )
-            positions = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
+            positions = jnp.asarray(
+                jnp.sum(prefix_mask.astype(jnp.float32), axis=-1)[:, None]
+                + jnp.cumsum(suffix_mask.astype(jnp.float32), axis=-1)
+                - 1.0,
+                dtype=jnp.int32,
+            )
 
             (prefix_out, suffix_out, _), _ = self.PaliGemma.llm(
                 [None, suffix_tokens, None],
@@ -877,7 +891,12 @@ class ACOT_VLA(_model.BaseModel):
                 suffix_tokens.shape[1],
                 prefix_tokens.shape[1] + suffix_tokens.shape[1],
             )
-            positions = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
+            positions = jnp.asarray(
+                jnp.sum(prefix_mask.astype(jnp.float32), axis=-1)[:, None]
+                + jnp.cumsum(suffix_mask.astype(jnp.float32), axis=-1)
+                - 1.0,
+                dtype=jnp.int32,
+            )
 
             (prefix_out, _, suffix_out), _ = self.PaliGemma.llm(
                 [None, None, suffix_tokens],
