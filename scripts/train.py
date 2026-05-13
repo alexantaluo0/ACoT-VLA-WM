@@ -1,9 +1,24 @@
 import dataclasses
 import functools
 import logging
+import pathlib
 import platform
-from typing import Any
 import os
+import sys
+from typing import Any
+
+
+def _prefer_packaged_cuda_tools() -> None:
+    """Prefer CUDA tools installed by uv/JAX over older system CUDA tools."""
+    for path in sys.path:
+        cuda_bin = pathlib.Path(path) / "nvidia" / "cu13" / "bin"
+        if (cuda_bin / "ptxas").exists():
+            os.environ["PATH"] = f"{cuda_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+            return
+
+
+_prefer_packaged_cuda_tools()
+
 import etils.epath as epath
 import flax.nnx as nnx
 from flax.training import common_utils

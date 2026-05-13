@@ -11,19 +11,19 @@ dependencies = [
     "einops>=0.8.0",
     "equinox>=0.11.8",
     "flatbuffers>=24.3.25",
-    "flax==0.10.2",
+    "flax==0.10.6",
     "fsspec[gcs]>=2024.6.0",
     "gym-aloha>=0.1.1",
     "imageio>=2.36.1",
-    "jax[cuda12]==0.5.3",
+    "jax[cuda13]==0.8.1",
     "jaxtyping==0.2.36",
     "lerobot",
     "ml_collections==1.0.0",
-    "numpy>=1.22.4,<2.0.0",
+    "numpy>=2.0,<3.0.0",
     "numpydantic>=1.6.6",
     "opencv-python>=4.10.0.84",
     "openpi-client",
-    "orbax-checkpoint==0.11.13",
+    "orbax-checkpoint==0.11.26",
     "pillow>=11.0.0",
     "sentencepiece>=0.2.0",
     "torch>=2.7.0",
@@ -57,13 +57,28 @@ dev = [
     "pynvml>=12.0.0",
 ]
 rlds = [
-    "dlimp",
-    "tensorflow-cpu==2.15.0",
-    "tensorflow-datasets==4.9.9",
+    # Disabled in the main B300 / NumPy 2 environment.
+    # `dlimp` hard-pins TensorFlow 2.15, which requires `numpy<2`.
+    # Use a separate legacy environment if RLDS loading is needed.
 ]
 
 [tool.uv]
-override-dependencies = ["ml-dtypes==0.4.1", "tensorstore==0.1.74", "av==13.1.0"]
+override-dependencies = [
+    "tensorstore==0.1.74",
+    "av==13.1.0",
+    "nvidia-cublas==13.0.0.19",
+    "nvidia-cuda-cupti==13.0.48",
+    "nvidia-cuda-nvrtc==13.0.48",
+    "nvidia-cuda-runtime==13.0.48",
+    "nvidia-cudnn-cu13==9.13.0.50",
+    "nvidia-cufft==12.0.0.15",
+    "nvidia-cusolver==12.0.3.29",
+    "nvidia-cusparse==12.6.2.49",
+    "nvidia-nccl-cu13==2.27.7",
+    "nvidia-nvjitlink==13.0.39",
+    "nvidia-nvshmem-cu13==3.3.24",
+]
+environments = ["sys_platform == 'linux' and python_version == '3.11'"]
 
 [tool.uv.sources]
 openpi-client = { workspace = true }

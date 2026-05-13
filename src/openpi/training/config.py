@@ -1,6 +1,7 @@
 """See _CONFIGS for the list of available configs."""
 
 import abc
+import enum
 from collections.abc import Sequence
 import dataclasses
 import difflib
@@ -39,6 +40,15 @@ ModelType: TypeAlias = _model.ModelType
 Filter: TypeAlias = nnx.filterlib.Filter
 
 
+class LeRobotObservationMode(str, enum.Enum):
+    """How visual observations are loaded. Choose explicitly; validated against ``meta/info.json``."""
+
+    # MP4-backed ``dtype: video`` features (LeRobot decodes video).
+    video_mp4 = "video_mp4"
+    # ``dtype: image`` columns in ``data/chunk-*/*.parquet`` (e.g. after ``predecode_lerobot_videos_to_images``).
+    parquet_images = "parquet_images"
+
+
 @dataclasses.dataclass(frozen=True)
 class AssetsConfig:
     """Determines the location of assets (e.g., norm stats) that will be used to set up the data pipeline.
@@ -68,7 +78,10 @@ class AssetsConfig:
 
 @dataclasses.dataclass(frozen=True)
 class DataConfig:
-    # LeRobot repo id. If None, fake data will be created.
+    # LeRobot dataset root (local path or HF cache id). If None, fake data will be created. Episodes are
+    # typically under ``data/chunk-*/episode_*.parquet``. How visuals are resolved is fixed by
+    # ``lerobot_observation_mode`` (MP4 ``video`` features vs parquet ``image`` columns); see CLI
+    # ``--data.lerobot-observation-mode``.
     repo_id: str | None = None
     # Directory within the assets directory containing the data assets.
     asset_id: str | None = None
@@ -106,6 +119,9 @@ class DataConfig:
     rlds_data_dir: str | None = None
     # Action space for DROID dataset.
     action_space: droid_rlds_dataset.DroidActionSpace | None = None
+
+    # LeRobot only: ``video_mp4`` vs ``parquet_images``. CLI: ``--data.lerobot-observation-mode``.
+    lerobot_observation_mode: LeRobotObservationMode = LeRobotObservationMode.video_mp4
 
 
 class GroupFactory(Protocol):
@@ -194,6 +210,12 @@ class ModelTransformFactory(GroupFactory):
 class DataConfigFactory(abc.ABC):
     # The LeRobot repo id.
     repo_id: str = tyro.MISSING
+    # When ``lerobot_observation_mode`` is ``parquet_images``: LeRobot root with image columns in parquet
+    # (see ``scripts/predecode_lerobot_videos_to_images.py``). Norm / default ``asset_id`` still use ``repo_id``.
+    predecoded_repo_id: str | None = None
+    # ``video_mp4`` (decode MP4) vs ``parquet_images`` (read dtype=image from parquet). CLI:
+    # ``--data.lerobot-observation-mode {video_mp4|parquet_images}``.
+    lerobot_observation_mode: LeRobotObservationMode = LeRobotObservationMode.video_mp4
     # Determines how the assets will be loaded.
     assets: AssetsConfig = dataclasses.field(default_factory=AssetsConfig)
     # Base config that will be updated by the factory.
@@ -204,13 +226,39 @@ class DataConfigFactory(abc.ABC):
         """Create a data config."""
 
     def create_base_config(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
-        repo_id = self.repo_id if self.repo_id is not tyro.MISSING else None
-        asset_id = self.assets.asset_id or repo_id
+        source_repo_id = self.repo_id if self.repo_id is not tyro.MISSING else None
+        mode = self.lerobot_observation_mode
+
+        if mode == LeRobotObservationMode.video_mp4:
+            if self.predecoded_repo_id:
+                raise ValueError(
+                    "lerobot_observation_mode=video_mp4 cannot be used with predecoded_repo_id. "
+                    "Unset --data.predecoded-repo-id, or use --data.lerobot-observation-mode parquet_images."
+                )
+            if isinstance(source_repo_id, list):
+                data_repo_id = source_repo_id
+                default_asset_key = source_repo_id
+            else:
+                data_repo_id = source_repo_id
+                default_asset_key = source_repo_id
+        elif mode == LeRobotObservationMode.parquet_images:
+            if isinstance(source_repo_id, list):
+                raise ValueError(
+                    "lerobot_observation_mode=parquet_images does not support repo_id as a list; merge datasets "
+                    "outside LeRobot or use video_mp4."
+                )
+            data_repo_id = self.predecoded_repo_id or source_repo_id
+            default_asset_key = source_repo_id
+        else:
+            raise AssertionError(mode)
+
+        asset_id = self.assets.asset_id or default_asset_key
         return dataclasses.replace(
             self.base_config or DataConfig(),
-            repo_id=repo_id,
+            repo_id=data_repo_id,
             asset_id=asset_id,
             norm_stats=self._load_norm_stats(epath.Path(self.assets.assets_dir or assets_dirs), asset_id),
+            lerobot_observation_mode=mode,
         )
 
     def _load_norm_stats(self, assets_dir: epath.Path, asset_id: str | None) -> dict[str, _transforms.NormStats] | None:
@@ -1194,7 +1242,7 @@ class TrainConfig:
     num_train_steps: int = 30_000
 
     # How often (in steps) to log training metrics.
-    log_interval: int = 100
+    log_interval: int = 20
     # How often (in steps) to save checkpoints.
     save_interval: int = 1000
     # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
@@ -1964,8 +2012,10 @@ _CONFIGS = [
         ),
         data=LerobotACOTGo2DataConfig(
             default_prompt="Pick up the block and place it into the box.",
-            # Replace with your LeRobot dataset root (local path or HF repo id).
+            lerobot_observation_mode=LeRobotObservationMode.parquet_images,
+            # Source dataset (e.g. video layout); training data root is predecoded_repo_id.
             repo_id="/data/dataset/Robotdataset/Robotdataset/AgiBot_World/AgiBotWorldChallenge-2026/Reasoning2Action-Sim/place_block_into_box",
+            predecoded_repo_id="/data/dataset/Robotdataset/Robotdataset/AgiBot_World/AgiBotWorldChallenge-2026/Reasoning2Action-Sim/place_block_into_box_images",
             assets=AssetsConfig(
                 assets_dir=None,
                 # Norm stats: directory name under assets/<config-name>/ (default), or an absolute path to

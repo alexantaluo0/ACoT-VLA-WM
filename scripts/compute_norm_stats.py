@@ -20,8 +20,11 @@ import torch
 import tqdm
 import tyro
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.common.datasets.lerobot_dataset import LeRobotDatasetMetadata
+from lerobot.common.datasets.lerobot_dataset import MultiLeRobotDataset
 
 import openpi.models.model as _model
+import openpi.policies.go2_policy as go2_policy
 import openpi.shared.normalize as normalize
 import openpi.training.config as _config
 import openpi.training.data_loader as _data_loader
@@ -62,6 +65,74 @@ class RemoveStrings(transforms.DataTransformFn):
         return {k: v for k, v in x.items() if not np.issubdtype(np.asarray(v).dtype, np.str_)}
 
 
+class Go2ACOTNumericInputs(transforms.DataTransformFn):
+    """Numeric-only version of Go2ACOTInputs for norm stats; avoids loading/processing images."""
+
+    def __init__(self, source: go2_policy.Go2ACOTInputs):
+        self._source = source
+
+    def __call__(self, data: dict) -> dict:
+        data = self._source.slice_state_and_action(data)
+        state = transforms.pad_to_dim(data["state"], self._source.action_dim).copy()
+        if self._source.state_mask is not None:
+            state[np.array(self._source.state_mask)] = 0
+
+        inputs = {"state": state}
+
+        if self._source.acot_action_generation is not None and "actions" in data:
+            action_horizons, joint_action_shifts = self._source.acot_action_generation
+            raw_data = data["actions"]
+            for idx, key in enumerate(("coarse_actions", "actions")):
+                action_horizon = action_horizons[idx]
+                joint_action_shift = joint_action_shifts[idx]
+                required_length = (action_horizon - 1) * joint_action_shift + 1
+                data[key] = raw_data[:required_length:joint_action_shift].copy()
+                assert len(data[key]) == action_horizon
+
+        for key in ("coarse_actions", "actions"):
+            if key in data:
+                if self._source.action_mask is not None:
+                    data[key][:, np.array(self._source.action_mask)[: data[key].shape[1]]] = 0
+                inputs[key] = transforms.pad_to_dim(data[key], self._source.action_dim)
+
+        return inputs
+
+
+def _remove_image_columns(dataset: _data_loader.Dataset) -> None:
+    """Drop image columns from HF datasets so norm stats never materialize large images."""
+    if isinstance(dataset, _data_loader.TransformedDataset):
+        _remove_image_columns(dataset._dataset)
+        return
+
+    if isinstance(dataset, MultiLeRobotDataset):
+        for sub_dataset in dataset._datasets:
+            _remove_image_columns(sub_dataset)
+        return
+
+    if isinstance(dataset, LeRobotDataset):
+        image_columns = [key for key in dataset.meta.camera_keys if key in dataset.hf_dataset.column_names]
+        if image_columns:
+            dataset.hf_dataset = dataset.hf_dataset.remove_columns(image_columns)
+
+
+def _norm_stats_transforms(data_config: _config.DataConfig) -> list[transforms.DataTransformFn]:
+    out: list[transforms.DataTransformFn] = []
+    for transform in [*data_config.repack_transforms.inputs, *data_config.data_transforms.inputs]:
+        if isinstance(transform, transforms.RepackTransform):
+            structure = {
+                key: value
+                for key, value in transform.structure.items()
+                if key in ("state", "actions", "coarse_actions")
+            }
+            out.append(transforms.RepackTransform(structure))
+        elif isinstance(transform, go2_policy.Go2ACOTInputs):
+            out.append(Go2ACOTNumericInputs(transform))
+        else:
+            out.append(transform)
+    out.append(RemoveStrings())
+    return out
+
+
 def create_torch_dataloader(
     data_config: _config.DataConfig,
     batch_size: int,
@@ -73,15 +144,10 @@ def create_torch_dataloader(
     if data_config.repo_id is None:
         raise ValueError("Data config must have a repo_id")
     dataset = _data_loader.create_torch_dataset(data_config, model_config)
+    _remove_image_columns(dataset)
     dataset = _data_loader.TransformedDataset(
         dataset,
-        [
-            *data_config.repack_transforms.inputs,
-            *data_config.data_transforms.inputs,
-            # No ResizeImages: norm_stats only use state / actions / coarse_actions; skipping saves a lot of CPU.
-            # Remove strings since they are not supported by JAX and are not needed to compute norm stats.
-            RemoveStrings(),
-        ],
+        _norm_stats_transforms(data_config),
     )
     # dataset = _data_loader.SafeDataset(dataset)
     if max_frames is not None and max_frames < len(dataset):
@@ -148,6 +214,14 @@ def _default_output_dir(config: _config.TrainConfig, data_config: _config.DataCo
     return config.assets_dirs
 
 
+def _repo_has_video_keys(repo_id: str | list[str] | None) -> bool:
+    if repo_id is None:
+        return False
+    if isinstance(repo_id, list):
+        return any(_repo_has_video_keys(item) for item in repo_id)
+    return len(LeRobotDatasetMetadata(repo_id).video_keys) > 0
+
+
 def main(
     config_name: str,
     max_frames: int | None = None,
@@ -166,7 +240,9 @@ def main(
                 data_config, config.model.action_horizon, config.batch_size, max_frames
             )
         else:
-            workers = 0 if skip_video else 8
+            # Only force single-process loading when monkey-patching video decode. Image datasets do not need that
+            # patch and benefit significantly from DataLoader workers.
+            workers = 0 if skip_video and _repo_has_video_keys(data_config.repo_id) else 8
             data_loader, num_batches = create_torch_dataloader(
                 data_config,
                 config.batch_size,

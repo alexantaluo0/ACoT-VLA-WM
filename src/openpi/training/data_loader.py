@@ -163,15 +163,47 @@ class FakeDataset(Dataset):
         return self._num_samples
 
 
+def _validate_lerobot_observation_metadata(repo_id: str, mode: _config.LeRobotObservationMode) -> None:
+    meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
+    has_video = len(meta.video_keys) > 0
+    has_image = len(meta.image_keys) > 0
+    if mode == _config.LeRobotObservationMode.video_mp4:
+        if not has_video:
+            raise ValueError(
+                f"lerobot_observation_mode=video_mp4 but dataset {repo_id!r} has no LeRobot video features "
+                f"(video_keys is empty). Point --data.repo-id at an MP4-backed dataset, or use "
+                f"--data.lerobot-observation-mode parquet_images for parquet image columns."
+            )
+    elif mode == _config.LeRobotObservationMode.parquet_images:
+        if has_video:
+            raise ValueError(
+                f"lerobot_observation_mode=parquet_images but dataset {repo_id!r} still declares video features "
+                f"{meta.video_keys!r}. Use a predecoded dataset root, or set --data.predecoded-repo-id to that root."
+            )
+        if not has_image:
+            raise ValueError(
+                f"lerobot_observation_mode=parquet_images but dataset {repo_id!r} has no LeRobot image features."
+            )
+    else:
+        raise AssertionError(mode)
+
+
 def create_torch_dataset(
     data_config: _config.DataConfig, model_config: _model.BaseModelConfig
 ) -> Dataset:
-    """Create a dataset for training."""
+    """Create a dataset for training (LeRobot). Observation policy is ``lerobot_observation_mode``."""
     repo_id = data_config.repo_id
     if repo_id is None:
         raise ValueError("Repo ID is not set. Cannot create dataset.")
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
+
+    mode = data_config.lerobot_observation_mode
+    if isinstance(repo_id, list):
+        for r in repo_id:
+            _validate_lerobot_observation_metadata(r, mode)
+    else:
+        _validate_lerobot_observation_metadata(repo_id, mode)
 
     if model_config.model_type == _model.ModelType.ACOT_VLA_PI0 or model_config.model_type == _model.ModelType.ACOT_VLA_PI05:
 

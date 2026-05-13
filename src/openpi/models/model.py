@@ -319,7 +319,15 @@ def restore_params(
 
     with ocp.PyTreeCheckpointer() as ckptr:
         metadata = ckptr.metadata(params_path)
-        item = {"params": metadata["params"]}
+        # Orbax >=0.11: `metadata` is StepMetadata; PyTree shape lives in `item_metadata`.
+        # Older paths expected a mapping with a top-level "params" key.
+        item_meta = getattr(metadata, "item_metadata", None)
+        if item_meta is not None:
+            params_meta = item_meta["params"]
+        else:
+            params_meta = metadata["params"]
+
+        item = {"params": params_meta}
 
         params = ckptr.restore(
             params_path,

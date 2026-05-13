@@ -133,9 +133,15 @@ class Go2ACOTInputs(transforms.DataTransformFn):
         if "actions" in data:
             n_a = data["actions"].shape[1]
             if n_a == 40:
-                # Legacy AgiBot-style flat action: arms + grippers + partial torso indices.
+                # AgiBot flat action -> train order:
+                # arms(14), grippers(2), head(3), waist(5).
                 data["actions"] = np.column_stack(
-                    (data["actions"][:, 16:30], data["actions"][:, 0:2], data["actions"][:, 33:38])
+                    (
+                        data["actions"][:, 16:30],
+                        data["actions"][:, 0:2],
+                        data["actions"][:, 30:33],
+                        data["actions"][:, 33:38],
+                    )
                 )
             elif n_a in (21, 24):
                 # Already ordered (e.g. 21-dim legacy stack, or 24-dim full-body joint order).
