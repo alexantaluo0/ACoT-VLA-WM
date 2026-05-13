@@ -211,7 +211,6 @@ class DataConfigFactory(abc.ABC):
             repo_id=repo_id,
             asset_id=asset_id,
             norm_stats=self._load_norm_stats(epath.Path(self.assets.assets_dir or assets_dirs), asset_id),
-            use_quantile_norm=False,
         )
 
     def _load_norm_stats(self, assets_dir: epath.Path, asset_id: str | None) -> dict[str, _transforms.NormStats] | None:
@@ -1966,11 +1965,12 @@ _CONFIGS = [
         data=LerobotACOTGo2DataConfig(
             default_prompt="Pick up the block and place it into the box.",
             # Replace with your LeRobot dataset root (local path or HF repo id).
-            repo_id="/data/dataset/Robotdataset/Robotdataset/AgiBot_World/AgiBotWorldChallenge-2026/Reasoning2Action-Sim/place_block_into_box_nodepth",
+            repo_id="/data/dataset/Robotdataset/Robotdataset/AgiBot_World/AgiBotWorldChallenge-2026/Reasoning2Action-Sim/place_block_into_box",
             assets=AssetsConfig(
                 assets_dir=None,
-                # Norm stats from scripts/compute_norm_stats.py; falls back to repo_id if asset_id is None.
-                asset_id="/data/luogz/code/ACoT-VLA/assets/place_block_into_box",
+                # Norm stats: directory name under assets/<config-name>/ (default), or an absolute path to
+                # the folder that contains norm_stats.json.
+                asset_id="/data/luogz/code/ACoT-VLA/assets/place_block_into_box/place_block_into_box_24d_norm",
             ),
             prompt_map_inject_to_training={
                 # Keys must match task names in dataset meta (same convention as ICRA block task).
@@ -2002,10 +2002,12 @@ _CONFIGS = [
                 dataloader_sampler="subtask",
                 prompt_from_hl_instruction=True,
                 video_tolerance_s=5,
+                # 1% / 99% 分位归一化（见 transforms.Normalize use_quantiles）
+                use_quantile_norm=True,
             ),
             joint_action_shifts=(2, 1),
             extra_delta_transform=(True, True),
-            # 24-dim action order: arm_l x7, arm_r x7, gripper_l/r, head x3, waist x5; model still uses action_dim=32.
+            # 24-dim action order: arm_l x7, arm_r x7, gripper_l/r, head x3, waist x5; pad to action_dim=32.
             robot_action_dim=24,
             state_mask=_transforms.make_bool_mask(-24, 8),
             action_mask=_transforms.make_bool_mask(-24, 8),

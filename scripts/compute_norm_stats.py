@@ -132,7 +132,7 @@ def create_rlds_dataloader(
 
 
 def _default_robot_action_dim(config: _config.TrainConfig) -> int | None:
-    """Use ``robot_action_dim`` from Go2-style data config when set (e.g. 24 for place_block_into_box)."""
+    """Use real robot action width from Go2-style configs; remaining model dims are treated as padding."""
     return getattr(config.data, "robot_action_dim", None)
 
 
@@ -216,6 +216,8 @@ def main(
 
     model_dim = config.model.action_dim
     rad = robot_action_dim if robot_action_dim is not None else _default_robot_action_dim(config)
+    if rad is not None and rad > model_dim:
+        raise ValueError(f"robot_action_dim ({rad}) cannot be larger than model action_dim ({model_dim}).")
     norm_stats = normalize.align_norm_stats_to_model_dim(
         norm_stats,
         model_action_dim=model_dim,
