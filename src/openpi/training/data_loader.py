@@ -1,6 +1,8 @@
 from collections.abc import Iterator, Sequence
+import contextlib
 import multiprocessing
 import os
+import pathlib
 import typing
 from typing import Protocol, SupportsIndex, TypeVar
 
@@ -16,6 +18,176 @@ from openpi.training.droid_rlds_dataset import DroidRldsDataset
 import openpi.transforms as _transforms
 
 T_co = TypeVar("T_co", covariant=True)
+
+_LEROBOT_VIDEO_KEY_FILTERS: dict[str, frozenset[str] | None] = {}
+_LEROBOT_VIDEO_KEY_FILTER_PATCHED = False
+_LEROBOT_DATASET_VIDEO_PATCHED = False
+
+
+def _all_lerobot_video_keys(meta: lerobot_dataset.LeRobotDatasetMetadata) -> list[str]:
+    return [key for key, ft in meta.features.items() if ft["dtype"] == "video"]
+
+
+def resolve_lerobot_video_keys_for_data_config(
+    meta: lerobot_dataset.LeRobotDatasetMetadata,
+    data_config: _config.DataConfig,
+) -> list[str] | None:
+    """Return the subset of LeRobot video keys required by ``data_config``, or ``None`` to keep all."""
+    filt = lerobot_observation_keys_from_data_config(data_config)
+    if filt is None:
+        return None
+    return [key for key in _all_lerobot_video_keys(meta) if key in filt]
+
+
+def _openpi_active_video_keys(dataset: lerobot_dataset.LeRobotDataset) -> list[str]:
+    custom = getattr(dataset, "_openpi_video_keys", None)
+    if custom is not None:
+        return custom
+    return dataset.meta.video_keys
+
+
+def _install_lerobot_dataset_video_key_patch() -> None:
+    global _LEROBOT_DATASET_VIDEO_PATCHED
+    if _LEROBOT_DATASET_VIDEO_PATCHED:
+        return
+    cls = lerobot_dataset.LeRobotDataset
+
+    def _get_query_timestamps(
+        self: lerobot_dataset.LeRobotDataset,
+        current_ts: float,
+        query_indices: dict[str, list[int]] | None = None,
+    ) -> dict[str, list[float]]:
+        query_timestamps: dict[str, list[float]] = {}
+        for key in _openpi_active_video_keys(self):
+            if query_indices is not None and key in query_indices:
+                timestamps = self.hf_dataset.select(query_indices[key])["timestamp"]
+                query_timestamps[key] = torch.stack(timestamps).tolist()
+            else:
+                query_timestamps[key] = [current_ts]
+        return query_timestamps
+
+    def _query_hf_dataset(
+        self: lerobot_dataset.LeRobotDataset,
+        query_indices: dict[str, list[int]],
+    ) -> dict:
+        video_keys = set(_openpi_active_video_keys(self))
+        return {
+            key: torch.stack(self.hf_dataset.select(q_idx)[key])
+            for key, q_idx in query_indices.items()
+            if key not in video_keys
+        }
+
+    cls._get_query_timestamps = _get_query_timestamps
+    cls._query_hf_dataset = _query_hf_dataset
+    _LEROBOT_DATASET_VIDEO_PATCHED = True
+
+
+def _attach_openpi_video_keys(dataset: "Dataset", video_keys: list[str] | None) -> None:
+    if video_keys is None:
+        return
+    while isinstance(dataset, TransformedDataset):
+        dataset = dataset._dataset
+    if isinstance(dataset, lerobot_dataset.LeRobotDataset):
+        _install_lerobot_dataset_video_key_patch()
+        dataset._openpi_video_keys = video_keys
+
+
+def resolve_lerobot_repo_root(repo_id: str) -> tuple[str, pathlib.Path]:
+    """Resolve LeRobot ``repo_id`` and on-disk ``root`` (supports absolute local paths)."""
+    path = pathlib.Path(repo_id)
+    if path.is_absolute():
+        return repo_id, path
+    root = pathlib.Path(lerobot_dataset.HF_LEROBOT_HOME) / repo_id
+    return repo_id, root
+
+
+def lerobot_observation_keys_from_data_config(data_config: _config.DataConfig) -> frozenset[str] | None:
+    """LeRobot feature keys referenced by repack transforms (e.g. ``observation.images.top_head``)."""
+    keys: set[str] = set()
+
+    def _walk(value: object) -> None:
+        if isinstance(value, str) and value.startswith("observation.images."):
+            keys.add(value)
+        elif isinstance(value, dict):
+            for nested in value.values():
+                _walk(nested)
+
+    for transform in data_config.repack_transforms.inputs:
+        if isinstance(transform, _transforms.RepackTransform):
+            _walk(transform.structure)
+    return frozenset(keys) if keys else None
+
+
+def _install_lerobot_video_key_filter_patch() -> None:
+    global _LEROBOT_VIDEO_KEY_FILTER_PATCHED
+    if _LEROBOT_VIDEO_KEY_FILTER_PATCHED:
+        return
+    meta_cls = lerobot_dataset.LeRobotDatasetMetadata
+    orig_get = meta_cls.video_keys.fget
+
+    def _filtered_video_keys(self: lerobot_dataset.LeRobotDatasetMetadata) -> list[str]:
+        keys = orig_get(self)
+        filt = _LEROBOT_VIDEO_KEY_FILTERS.get(str(pathlib.Path(self.root).resolve()))
+        if filt is None:
+            return keys
+        return [key for key in keys if key in filt]
+
+    meta_cls.video_keys = property(_filtered_video_keys)
+    _LEROBOT_VIDEO_KEY_FILTER_PATCHED = True
+
+
+@contextlib.contextmanager
+def lerobot_video_key_filter(root: pathlib.Path, keys: frozenset[str] | None):
+    """Temporarily restrict which LeRobot ``video_keys`` are required/decoded for ``root``."""
+    _install_lerobot_video_key_filter_patch()
+    root_key = str(root.resolve())
+    previous = _LEROBOT_VIDEO_KEY_FILTERS.get(root_key)
+    _LEROBOT_VIDEO_KEY_FILTERS[root_key] = keys
+    try:
+        yield
+    finally:
+        if previous is None:
+            _LEROBOT_VIDEO_KEY_FILTERS.pop(root_key, None)
+        else:
+            _LEROBOT_VIDEO_KEY_FILTERS[root_key] = previous
+
+
+def register_lerobot_video_key_filter(root: pathlib.Path, keys: frozenset[str] | None) -> None:
+    """Register a persistent LeRobot video-key filter for ``root`` (until process exit)."""
+    _install_lerobot_video_key_filter_patch()
+    root_key = str(root.resolve())
+    if keys is None:
+        _LEROBOT_VIDEO_KEY_FILTERS.pop(root_key, None)
+    else:
+        _LEROBOT_VIDEO_KEY_FILTERS[root_key] = keys
+
+
+def _validate_local_lerobot_files(
+    root: pathlib.Path,
+    meta: lerobot_dataset.LeRobotDatasetMetadata,
+    *,
+    video_keys: Sequence[str],
+) -> None:
+    missing: list[str] = []
+    for ep_idx in range(meta.total_episodes):
+        parquet = root / meta.get_data_file_path(ep_idx)
+        if not parquet.is_file():
+            missing.append(str(parquet))
+        for vid_key in video_keys:
+            video = root / meta.get_video_file_path(ep_idx, vid_key)
+            if not video.is_file():
+                missing.append(str(video))
+    if not missing:
+        return
+    preview = "\n".join(missing[:25])
+    extra = len(missing) - min(len(missing), 25)
+    suffix = f"\n... and {extra} more missing files" if extra > 0 else ""
+    raise RuntimeError(
+        f"Local LeRobot dataset at {root} is incomplete ({len(missing)} missing files). "
+        f"Restore the missing parquet/video files or restrict training to cameras declared in "
+        f"repack_transforms (unused depth videos can be omitted).\n"
+        f"Missing examples:\n{preview}{suffix}"
+    )
 
 
 class Dataset(Protocol[T_co]):
@@ -163,10 +335,17 @@ class FakeDataset(Dataset):
         return self._num_samples
 
 
-def _validate_lerobot_observation_metadata(repo_id: str, mode: _config.LeRobotObservationMode) -> None:
-    meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
-    has_video = len(meta.video_keys) > 0
-    has_image = len(meta.image_keys) > 0
+def _validate_lerobot_observation_metadata(
+    repo_id: str,
+    mode: _config.LeRobotObservationMode,
+    *,
+    root: pathlib.Path | None = None,
+    video_key_filter: frozenset[str] | None = None,
+) -> None:
+    with lerobot_video_key_filter(root or resolve_lerobot_repo_root(repo_id)[1], video_key_filter):
+        meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id, root=root)
+        has_video = len(meta.video_keys) > 0
+        has_image = len(meta.image_keys) > 0
     if mode == _config.LeRobotObservationMode.video_mp4:
         if not has_video:
             raise ValueError(
@@ -188,6 +367,44 @@ def _validate_lerobot_observation_metadata(repo_id: str, mode: _config.LeRobotOb
         raise AssertionError(mode)
 
 
+def _create_single_lerobot_dataset(
+    repo_id: str,
+    data_config: _config.DataConfig,
+    action_chunk_size: int,
+) -> Dataset:
+    repo_root = resolve_lerobot_repo_root(repo_id)[1]
+    root_key = str(repo_root.resolve())
+    if root_key not in _LEROBOT_VIDEO_KEY_FILTERS:
+        register_lerobot_video_key_filter(repo_root, lerobot_observation_keys_from_data_config(data_config))
+    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id, root=repo_root)
+    if pathlib.Path(repo_id).is_absolute() or repo_root.is_dir():
+        _validate_local_lerobot_files(repo_root, dataset_meta, video_keys=dataset_meta.video_keys)
+    dataset = lerobot_dataset.LeRobotDataset(
+        repo_id,
+        root=repo_root,
+        delta_timestamps={
+            key: [t / dataset_meta.fps for t in range(action_chunk_size)]
+            for key in data_config.action_sequence_keys
+        },
+        tolerance_s=float(data_config.video_tolerance_s),
+    )
+
+    if data_config.prompt_from_task:
+        dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
+    if data_config.prompt_from_hl_instruction:
+        dataset = TransformedDataset(
+            dataset,
+            [_transforms.PromptFromHighlevelInstruction(dataset_meta.info["instruction_segments"])],
+        )
+    active_video_keys = resolve_lerobot_video_keys_for_data_config(dataset_meta, data_config)
+    if active_video_keys is not None:
+        skipped = sorted(set(_all_lerobot_video_keys(dataset_meta)) - set(active_video_keys))
+        if skipped:
+            print(f"LeRobot dataset {repo_root}: skipping unused video keys {skipped}")
+        _attach_openpi_video_keys(dataset, active_video_keys)
+    return dataset
+
+
 def create_torch_dataset(
     data_config: _config.DataConfig, model_config: _model.BaseModelConfig
 ) -> Dataset:
@@ -199,11 +416,18 @@ def create_torch_dataset(
         return FakeDataset(model_config, num_samples=1024)
 
     mode = data_config.lerobot_observation_mode
+    video_key_filter = lerobot_observation_keys_from_data_config(data_config)
     if isinstance(repo_id, list):
         for r in repo_id:
-            _validate_lerobot_observation_metadata(r, mode)
+            _, root = resolve_lerobot_repo_root(r)
+            _validate_lerobot_observation_metadata(
+                r, mode, root=root, video_key_filter=video_key_filter
+            )
     else:
-        _validate_lerobot_observation_metadata(repo_id, mode)
+        _, root = resolve_lerobot_repo_root(repo_id)
+        _validate_lerobot_observation_metadata(
+            repo_id, mode, root=root, video_key_filter=video_key_filter
+        )
 
     if model_config.model_type == _model.ModelType.ACOT_VLA_PI0 or model_config.model_type == _model.ModelType.ACOT_VLA_PI05:
 
@@ -243,20 +467,7 @@ def create_torch_dataset(
             print(f"Dataset {i} has {len(d)} frames.")
 
     else:
-        dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
-        dataset = lerobot_dataset.LeRobotDataset(
-            data_config.repo_id,
-            delta_timestamps={
-                key: [t / dataset_meta.fps for t in range(action_chunk_size)]
-                for key in data_config.action_sequence_keys
-            },
-            tolerance_s=float(data_config.video_tolerance_s),
-        )
-
-        if data_config.prompt_from_task:
-            dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
-        if data_config.prompt_from_hl_instruction:
-            dataset = TransformedDataset(dataset, [_transforms.PromptFromHighlevelInstruction(dataset_meta.info['instruction_segments'])])
+        return _create_single_lerobot_dataset(repo_id, data_config, action_chunk_size)
 
     return dataset
 
@@ -577,6 +788,9 @@ def _worker_init_fn(worker_id: int) -> None:
     # means that this approach will not work for selecting the backend.
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
     os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
+    # Spawned DataLoader workers re-import modules; re-apply LeRobot patches here.
+    _install_lerobot_dataset_video_key_patch()
+    _install_lerobot_video_key_filter_patch()
 
 
 class RLDSDataLoader:
@@ -646,3 +860,7 @@ class DataLoaderACOTImpl(DataLoader):
     def __iter__(self):
         for batch in self._data_loader:
             yield _model.Observation.from_dict(batch), batch["actions"], batch["coarse_actions"]
+
+
+_install_lerobot_dataset_video_key_patch()
+_install_lerobot_video_key_filter_patch()

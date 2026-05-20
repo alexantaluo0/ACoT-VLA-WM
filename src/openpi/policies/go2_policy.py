@@ -119,16 +119,26 @@ class Go2ACOTInputs(transforms.DataTransformFn):
     }
     acot_action_generation: Sequence[Sequence[int]] | None = None
 
+    # 将state和action重新排列为24-dim布局，匹配40-dim AgiBot actions的布局
     def slice_state_and_action(self, data):
-        # Slice the state and action to the expected dimensions based on the original data shape
+        # Slice state to 24-dim layout matching action reorder for 40-dim AgiBot actions:
+        # arm joints (14), grippers (2), head (3), waist (5).
         state_indices = None
         if len(data["state"]) == 183:
-            state_indices = list(range(54, 68)) + [0, 1] + list(range(99, 104))
+            state_indices = (
+                list(range(54, 68)) + [0, 1] + list(range(96, 99)) + list(range(99, 104))
+            )
 
         if len(data["state"]) == 159:
-            state_indices = list(range(30, 44)) + [0, 1] + list(range(75, 80))
+            state_indices = (
+                list(range(30, 44)) + [0, 1] + list(range(72, 75)) + list(range(75, 80))
+            )
         if state_indices is not None:
             data["state"] = data["state"][state_indices]
+            if len(data["state"]) != 24:
+                raise ValueError(
+                    f"Go2ACOTInputs: expected 24-dim state after slicing, got {len(data['state'])}."
+                )
 
         if "actions" in data:
             n_a = data["actions"].shape[1]
@@ -211,7 +221,6 @@ class Go2ACOTInputs(transforms.DataTransformFn):
             else:
                 raise ValueError(f"Camera {camera} not found in data")
 
-        # Create image mask based on available cameras
         image_mask = {self.rename_map[camera]: np.True_ for camera in self.EXPECTED_CAMERAS}
 
         # Prepare inputs dictionary

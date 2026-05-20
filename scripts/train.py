@@ -38,6 +38,7 @@ import openpi.training.checkpoints as _checkpoints
 import openpi.training.config as _config
 import openpi.training.data_loader as _data_loader
 import openpi.training.optimizer as _optimizer
+import openpi.training.robot_io_debug as _robot_io_debug
 import openpi.training.sharding as sharding
 import openpi.training.utils as training_utils
 import openpi.training.weight_loaders as _weight_loaders
@@ -297,6 +298,10 @@ def main(config: _config.TrainConfig):
     batch = next(data_iter)
     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
 
+    if os.getenv("ROBOT_IO_DEBUG", "1").lower() not in ("0", "false", "no"):
+        debug_log_path = _robot_io_debug.log_training_pipeline_debug(config, batch)
+        logging.info("Robot I/O debug (pre-norm + model input 24-d) written to: %s", debug_log_path)
+
     # Log images from first batch to sanity check.
     images_to_log = [
         wandb.Image(np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1))
@@ -307,6 +312,44 @@ def main(config: _config.TrainConfig):
     train_state, train_state_sharding = init_train_state(config, init_rng, mesh, resume=resuming)
     jax.block_until_ready(train_state)
     logging.info(f"Initialized train state:\n{training_utils.array_tree_to_info(train_state.params)}")
+
+    sharded_compute_loss = None
+    sharded_loss_action = None
+    if config.model.model_type in (_model.ModelType.ACOT_VLA_PI05, _model.ModelType.ACOT_VLA_PI0):
+        sharded_compute_loss = _robot_io_debug.make_sharded_acot_compute_loss_fn(
+            mesh=mesh,
+            train_state_sharding=train_state_sharding,
+            data_sharding=data_sharding,
+            replicated_sharding=replicated_sharding,
+        )
+        if os.getenv("LOSS_ACTION_METRIC", "1").lower() not in ("0", "false", "no"):
+            robot_action_dim = int(getattr(config.data, "robot_action_dim", 24) or 24)
+            loss_action_steps = int(os.getenv("LOSS_ACTION_NUM_STEPS", "5"))
+            sharded_loss_action = _robot_io_debug.make_sharded_acot_loss_action_fn(
+                mesh=mesh,
+                train_state_sharding=train_state_sharding,
+                data_sharding=data_sharding,
+                replicated_sharding=replicated_sharding,
+                robot_action_dim=robot_action_dim,
+                num_sample_steps=loss_action_steps,
+            )
+
+    if (
+        os.getenv("ROBOT_IO_DEBUG", "1").lower() not in ("0", "false", "no")
+        and sharded_compute_loss is not None
+    ):
+        _robot_io_debug.log_model_forward_debug(
+            config,
+            train_state,
+            batch,
+            train_rng,
+            sharded_compute_loss=sharded_compute_loss,
+            log_path=config.checkpoint_dir / "robot_io_debug.log",
+        )
+        logging.info(
+            "Robot I/O model forward debug appended to: %s",
+            config.checkpoint_dir / "robot_io_debug.log",
+        )
     num_params = training_utils.count_parameters(train_state.params)
     logging.info(f"Total number of parameters: {num_params:,}")
 
@@ -348,9 +391,33 @@ def main(config: _config.TrainConfig):
         if step % config.log_interval == 0:
             stacked_infos = common_utils.stack_forest(infos)
             reduced_info = jax.device_get(jax.tree.map(jnp.mean, stacked_infos))
+            loss_action_val = None
+            if sharded_loss_action is not None:
+                observation, actions, _ = batch
+                loss_action_rng = jax.random.fold_in(train_rng, step + 10_000)
+                loss_action_val = _robot_io_debug.loss_to_float(
+                    sharded_loss_action(train_state, loss_action_rng, observation, actions)
+                )
+                reduced_info["loss_action"] = loss_action_val
             info_str = ", ".join(f"{k}={v:.4f}" for k, v in reduced_info.items())
             pbar.write(f"Step {step}: {info_str}")
             wandb.log(reduced_info, step=step)
+            if (
+                os.getenv("ROBOT_IO_DEBUG", "1").lower() not in ("0", "false", "no")
+                and sharded_compute_loss is not None
+            ):
+                debug_rng = jax.random.fold_in(train_rng, step + 1)
+                _robot_io_debug.log_step_action_debug(
+                    config,
+                    train_state,
+                    batch,
+                    debug_rng,
+                    sharded_compute_loss=sharded_compute_loss,
+                    sharded_loss_action=sharded_loss_action,
+                    loss_action=loss_action_val,
+                    step=step,
+                    log_path=config.checkpoint_dir / "robot_io_debug.log",
+                )
             infos = []
         batch = next(data_iter)
 

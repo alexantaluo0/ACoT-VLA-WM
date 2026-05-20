@@ -20,7 +20,6 @@ import torch
 import tqdm
 import tyro
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
-from lerobot.common.datasets.lerobot_dataset import LeRobotDatasetMetadata
 from lerobot.common.datasets.lerobot_dataset import MultiLeRobotDataset
 
 import openpi.models.model as _model
@@ -214,14 +213,6 @@ def _default_output_dir(config: _config.TrainConfig, data_config: _config.DataCo
     return config.assets_dirs
 
 
-def _repo_has_video_keys(repo_id: str | list[str] | None) -> bool:
-    if repo_id is None:
-        return False
-    if isinstance(repo_id, list):
-        return any(_repo_has_video_keys(item) for item in repo_id)
-    return len(LeRobotDatasetMetadata(repo_id).video_keys) > 0
-
-
 def main(
     config_name: str,
     max_frames: int | None = None,
@@ -234,15 +225,17 @@ def main(
 
     # LeRobot: skip MP4 decode unless user explicitly needs real frames (slow; irrelevant to norm_stats).
     skip_video = data_config.rlds_data_dir is None and not decode_video
+    if skip_video and data_config.repo_id is not None and not isinstance(data_config.repo_id, list):
+        repo_root = _data_loader.resolve_lerobot_repo_root(data_config.repo_id)[1]
+        _data_loader.register_lerobot_video_key_filter(repo_root, frozenset())
     with skip_video_decode_for_norm_stats(enabled=skip_video):
         if data_config.rlds_data_dir is not None:
             data_loader, num_batches = create_rlds_dataloader(
                 data_config, config.model.action_horizon, config.batch_size, max_frames
             )
         else:
-            # Only force single-process loading when monkey-patching video decode. Image datasets do not need that
-            # patch and benefit significantly from DataLoader workers.
-            workers = 0 if skip_video and _repo_has_video_keys(data_config.repo_id) else 8
+            # Monkey-patching video decode only works in the main process.
+            workers = 0 if skip_video else 8
             data_loader, num_batches = create_torch_dataloader(
                 data_config,
                 config.batch_size,
@@ -254,7 +247,8 @@ def main(
         keys = ["state", "actions", "coarse_actions"]
         stats = {key: normalize.RunningStats() for key in keys}
 
-        sample_ratio = 0.1
+        # 少量数据时，使用全部数据；大量数据时，使用部分数据，比例为 sample_ratio = 0.1。
+        sample_ratio = 1.0
         max_batches = int(num_batches * sample_ratio)
 
         data_iter = iter(data_loader)
