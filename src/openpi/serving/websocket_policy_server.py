@@ -12,6 +12,18 @@ import websockets.frames
 logger = logging.getLogger(__name__)
 
 
+def _format_obs_prompt(obs: dict) -> str:
+    """Return a readable prompt string from client observation, if present."""
+    if "prompt" not in obs:
+        return "<missing; server will use default_prompt>"
+    prompt = obs["prompt"]
+    if hasattr(prompt, "item"):
+        prompt = prompt.item()
+    if isinstance(prompt, bytes):
+        prompt = prompt.decode("utf-8")
+    return str(prompt)
+
+
 class WebsocketPolicyServer:
     """Serves a policy using the websocket protocol. See websocket_client_policy.py for a client implementation.
 
@@ -56,6 +68,7 @@ class WebsocketPolicyServer:
             try:
                 start_time = time.monotonic()
                 obs = msgpack_numpy.unpackb(await websocket.recv())
+                logger.info("Client prompt: %s", _format_obs_prompt(obs))
 
                 infer_time = time.monotonic()
                 action = self._policy.infer(obs)

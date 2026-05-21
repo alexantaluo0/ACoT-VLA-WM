@@ -8,6 +8,7 @@ from typing import Protocol
 
 from etils import epath
 import jax
+import jax.numpy as jnp
 import orbax.checkpoint as ocp
 import orbax.checkpoint.future as future
 
@@ -101,16 +102,42 @@ def restore_state(
     del data_loader
 
     with at.disable_typechecking():
-        # Split params that can be used for inference into a separate item.
         train_state, params = _split_params(state)
-        restored = checkpoint_manager.restore(
-            step,
-            items={
-                "train_state": train_state,
-                "params": {"params": params},
-            },
-        )
-    return _merge_params(restored["train_state"], restored["params"])
+        try:
+            restored = checkpoint_manager.restore(
+                step,
+                items={
+                    "train_state": train_state,
+                    "params": {"params": params},
+                },
+            )
+            return _merge_params(restored["train_state"], restored["params"])
+        except ValueError as exc:
+            if "structures do not match" not in str(exc):
+                raise
+            restore_step = step if step is not None else max(checkpoint_manager.all_steps())
+            logging.warning(
+                "Checkpoint train_state does not match the current optimizer layout (e.g. "
+                "freeze_vision / trainable_filter changed). Restoring weights from step %s and "
+                "re-initializing opt_state. Original error: %s",
+                restore_step,
+                exc,
+            )
+            return _restore_params_and_step_only(
+                checkpoint_manager, train_state, params, restore_step
+            )
+
+
+def _restore_params_and_step_only(
+    checkpoint_manager: ocp.CheckpointManager,
+    train_state: training_utils.TrainState,
+    params: at.Params,
+    step: int,
+) -> training_utils.TrainState:
+    """Restore model weights (and step) when full train_state (esp. opt_state) is incompatible."""
+    restored = checkpoint_manager.restore(step, items={"params": {"params": params}})
+    merged = _merge_params(train_state, restored["params"])
+    return dataclasses.replace(merged, step=jnp.asarray(step, dtype=merged.step.dtype))
 
 
 def load_norm_stats(assets_dir: epath.Path | str, asset_id: str) -> dict[str, _normalize.NormStats] | None:

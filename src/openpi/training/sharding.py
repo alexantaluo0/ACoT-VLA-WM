@@ -100,3 +100,24 @@ def fsdp_sharding(
         return jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
 
     return jax.tree_util.tree_map_with_path(_shard_arr, pytree)
+
+
+def reshard_tree_to_shardings(tree, shardings):
+    """Re-home array leaves onto ``shardings`` after checkpoint restore on a different mesh.
+
+    Checkpoints keep the sharding they were saved with (e.g. 3 GPUs → mesh batch=1, fsdp=3).
+    Resuming on another device count (e.g. 6 GPUs → batch=2, fsdp=3) requires this before ``jit``.
+    """
+    def _reshard(arr, target_sharding):
+        if not isinstance(arr, jax.Array):
+            return arr
+        if arr.sharding == target_sharding:
+            return arr
+        return jax.device_put(arr, target_sharding)
+
+    return jax.tree.map(
+        _reshard,
+        tree,
+        shardings,
+        is_leaf=lambda x: isinstance(x, jax.Array),
+    )

@@ -374,31 +374,41 @@ class PromptFromLeRobotTask(DataTransformFn):
 
 @dataclasses.dataclass(frozen=True)
 class PromptFromHighlevelInstruction(DataTransformFn):
-    """Extracts a prompt from the current LeRobot dataset task."""
+    """根据 episode 内帧号，从 info.json 的 instruction_segments 选取当前子步骤 instruction 作为 prompt。"""
 
-    # Contains the LeRobot dataset tasks (dataset.meta.tasks).
+    # meta/info.json["instruction_segments"]：episode_id -> 子步骤列表（含 instruction 与帧区间）
     instruction_segments: dict
 
     def __call__(self, data: DataDict) -> DataDict:
+        # 必须有 episode_index，否则无法定位该 episode 的子步骤标注
         if "episode_index" not in data:
             raise ValueError('Cannot extract prompt without "task_index"')
 
+        # 当前样本所属 episode 与帧号（episode 内局部 frame_index）
         episode_index = int(data["episode_index"])
         frame_index = int(data["frame_index"])
+        # 取出该 episode 的全部子步骤；键为字符串形式的 episode id
         segments = self.instruction_segments.get(str(episode_index))
 
+        # 默认使用最后一个子步骤（当 frame 落在各段 end 边界上或未命中任何区间时的 fallback）
         segment_id = len(segments) - 1
+        # 强制第一段从帧 0 开始，避免标注里 start_frame_index 非 0 时漏掉开头帧
         segments[0]['start_frame_index'] = 0
+        # 按顺序查找 frame 所在的子步骤区间 [start_frame_index, end_frame_index)
         for i, segment in enumerate(segments):
-            if frame_index >= segment['start_frame_index'] and frame_index < segment['end_frame_index']:
+            # 左闭右开：frame == end_frame_index 时不属于本段（边界帧会落入 fallback/下一段逻辑）
+            if frame_index >= segment['start_frame_index'] and frame_index <= segment['end_frame_index']:
                 segment_id = i
                 break
-        
+
+        # segment_id 始终为 int，此处分支实际总会进入 if
         if segment_id is not None:
             segment = segments[segment_id]
+            # 当前帧对应的自然语言子任务描述，后续由 TokenizePrompt 编码进模型
             instruction = segment['instruction']
         else:
             raise ValueError(f"No segment found for episode {episode_index} and frame {frame_index}")
+        # 将 instruction 写入 prompt 字段，供下游 transform / 模型使用
         return {**data, "prompt": instruction}
 
 @dataclasses.dataclass(frozen=True)

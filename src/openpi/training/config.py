@@ -213,8 +213,10 @@ class DataConfigFactory(abc.ABC):
     # When ``lerobot_observation_mode`` is ``parquet_images``: LeRobot root with image columns in parquet
     # (see ``scripts/predecode_lerobot_videos_to_images.py``). Norm / default ``asset_id`` still use ``repo_id``.
     predecoded_repo_id: str | None = None
-    # ``video_mp4`` (decode MP4) vs ``parquet_images`` (read dtype=image from parquet). CLI:
-    # ``--data.lerobot-observation-mode {video_mp4|parquet_images}``.
+    # ``False``: decode MP4 under ``videos/`` (``video_mp4``). ``True``: read ``dtype: image`` from ``data/*.parquet``.
+    # CLI: ``--data.use-parquet-images``. Overrides ``lerobot_observation_mode`` when set via this flag.
+    use_parquet_images: bool = False
+    # Advanced override; ignored when ``use_parquet_images=True``. CLI: ``--data.lerobot-observation-mode``.
     lerobot_observation_mode: LeRobotObservationMode = LeRobotObservationMode.video_mp4
     # Determines how the assets will be loaded.
     assets: AssetsConfig = dataclasses.field(default_factory=AssetsConfig)
@@ -225,9 +227,14 @@ class DataConfigFactory(abc.ABC):
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         """Create a data config."""
 
+    def resolved_lerobot_observation_mode(self) -> LeRobotObservationMode:
+        if self.use_parquet_images:
+            return LeRobotObservationMode.parquet_images
+        return self.lerobot_observation_mode
+
     def create_base_config(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         source_repo_id = self.repo_id if self.repo_id is not tyro.MISSING else None
-        mode = self.lerobot_observation_mode
+        mode = self.resolved_lerobot_observation_mode()
 
         if mode == LeRobotObservationMode.video_mp4:
             if self.predecoded_repo_id:
@@ -2098,23 +2105,23 @@ _CONFIGS = [
         ),
         data=LerobotACOTGo2DataConfig(
             default_prompt="Use the right arm and right gripper to pick up the scanner from the table. Scan the three barcode positions in order: charging cable, charger, and phone case. Place the scanner back on the table.",
-            lerobot_observation_mode=LeRobotObservationMode.video_mp4,
-            repo_id="/data/dataset/Robotdataset/Robotdataset/G2_Robot/phone_packaging/task2_new",
+            # False: MP4 decode (task2_new). True: parquet image columns — point repo_id at predecoded dataset.
+            use_parquet_images=True,
+            repo_id="/data/dataset/Robotdataset/Robotdataset/G2_Robot/phone_packaging/task2_new_0520_images",
             assets=AssetsConfig(
                 assets_dir=None,
                 # Norm stats: directory name under assets/<config-name>/ (default), or an absolute path to
                 # the folder that contains norm_stats.json.
-                asset_id="/data/luogz/code/ACoT-VLA/assets/task2/task2_new_24d_norm",
+                asset_id="/data/luogz/code/ACoT-VLA/assets/task2_new_0520/norm_stats",
             ),
-            prompt_map_inject_to_training={
-                # Keys must match task names in dataset meta (same convention as ICRA block task).
-                "Scan the three barcode positions in order: charging cable, charger, and phone case": (
-                    "Use the right arm and right gripper to pick up the scanner from the table, "
-                    "Scan the three barcode positions in order: charging cable, charger, and phone case",
-                    "Place the scanner back on the table",
-                    0.2,
-                ),
-            },
+        prompt_map_inject_to_training={
+            "packaging_phone_line_real_2": (
+                "Use the right arm and right gripper to pick up the scanner from the table. "
+                "Scan the three barcode positions in order: charging cable, charger, and phone case. "
+                "Place the scanner back on the table.",
+                0.2,
+            ),
+        },
             repack_transforms=_transforms.Group(
                 inputs=[
                     _transforms.RepackTransform(
@@ -2150,7 +2157,7 @@ _CONFIGS = [
             delta_action_mask=_transforms.make_bool_mask(14, -18),
         ),
         lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=2_000,
+            warmup_steps=10_000,
             peak_lr=5e-5,
             decay_steps=1_000_000,
             decay_lr=5e-5,
@@ -2161,11 +2168,11 @@ _CONFIGS = [
             "/data/luogz/models/openpi-assets/checkpoints/pi05_base/params"
         ),
         num_train_steps=50_000,
-        save_interval=1000 if not os.getenv("DEBUG_MODE", default=False) == "true" else 200,
+        save_interval=2000 if not os.getenv("DEBUG_MODE", default=False) == "true" else 200,
         num_workers=24 if not os.getenv("DEBUG_MODE", default=False) == "true" else 1,
         batch_size=256 if not os.getenv("DEBUG_MODE", default=False) == "true" else 16,
         freeze_filter=acot_vla.ACOTConfig(paligemma_variant="gemma_2b").get_freeze_filter(
-            freeze_vision=True,
+            freeze_vision=False,
             freeze_llm=True,
             freeze_llm_embedder=True,
             freeze_dual_ae=[False, False],

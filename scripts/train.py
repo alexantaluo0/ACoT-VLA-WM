@@ -298,10 +298,6 @@ def main(config: _config.TrainConfig):
     batch = next(data_iter)
     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
 
-    if os.getenv("ROBOT_IO_DEBUG", "1").lower() not in ("0", "false", "no"):
-        debug_log_path = _robot_io_debug.log_training_pipeline_debug(config, batch)
-        logging.info("Robot I/O debug (pre-norm + model input 24-d) written to: %s", debug_log_path)
-
     # Log images from first batch to sanity check.
     images_to_log = [
         wandb.Image(np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1))
@@ -313,15 +309,8 @@ def main(config: _config.TrainConfig):
     jax.block_until_ready(train_state)
     logging.info(f"Initialized train state:\n{training_utils.array_tree_to_info(train_state.params)}")
 
-    sharded_compute_loss = None
     sharded_loss_action = None
     if config.model.model_type in (_model.ModelType.ACOT_VLA_PI05, _model.ModelType.ACOT_VLA_PI0):
-        sharded_compute_loss = _robot_io_debug.make_sharded_acot_compute_loss_fn(
-            mesh=mesh,
-            train_state_sharding=train_state_sharding,
-            data_sharding=data_sharding,
-            replicated_sharding=replicated_sharding,
-        )
         if os.getenv("LOSS_ACTION_METRIC", "1").lower() not in ("0", "false", "no"):
             robot_action_dim = int(getattr(config.data, "robot_action_dim", 24) or 24)
             loss_action_steps = int(os.getenv("LOSS_ACTION_NUM_STEPS", "5"))
@@ -334,27 +323,14 @@ def main(config: _config.TrainConfig):
                 num_sample_steps=loss_action_steps,
             )
 
-    if (
-        os.getenv("ROBOT_IO_DEBUG", "1").lower() not in ("0", "false", "no")
-        and sharded_compute_loss is not None
-    ):
-        _robot_io_debug.log_model_forward_debug(
-            config,
-            train_state,
-            batch,
-            train_rng,
-            sharded_compute_loss=sharded_compute_loss,
-            log_path=config.checkpoint_dir / "robot_io_debug.log",
-        )
-        logging.info(
-            "Robot I/O model forward debug appended to: %s",
-            config.checkpoint_dir / "robot_io_debug.log",
-        )
     num_params = training_utils.count_parameters(train_state.params)
     logging.info(f"Total number of parameters: {num_params:,}")
 
     if resuming:
         train_state = _checkpoints.restore_state(checkpoint_manager, train_state, data_loader)
+        # Checkpoint arrays retain the saved mesh (e.g. 3-GPU batch=1); realign to the current mesh.
+        train_state = sharding.reshard_tree_to_shardings(train_state, train_state_sharding)
+        jax.block_until_ready(train_state)
 
     if config.model.model_type == _model.ModelType.ACOT_VLA_PI05 or config.model.model_type == _model.ModelType.ACOT_VLA_PI0:
         ptrain_step = jax.jit(
@@ -402,22 +378,6 @@ def main(config: _config.TrainConfig):
             info_str = ", ".join(f"{k}={v:.4f}" for k, v in reduced_info.items())
             pbar.write(f"Step {step}: {info_str}")
             wandb.log(reduced_info, step=step)
-            if (
-                os.getenv("ROBOT_IO_DEBUG", "1").lower() not in ("0", "false", "no")
-                and sharded_compute_loss is not None
-            ):
-                debug_rng = jax.random.fold_in(train_rng, step + 1)
-                _robot_io_debug.log_step_action_debug(
-                    config,
-                    train_state,
-                    batch,
-                    debug_rng,
-                    sharded_compute_loss=sharded_compute_loss,
-                    sharded_loss_action=sharded_loss_action,
-                    loss_action=loss_action_val,
-                    step=step,
-                    log_path=config.checkpoint_dir / "robot_io_debug.log",
-                )
             infos = []
         batch = next(data_iter)
 
