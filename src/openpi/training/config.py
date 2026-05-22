@@ -2107,12 +2107,12 @@ _CONFIGS = [
             default_prompt="Use the right arm and right gripper to pick up the scanner from the table. Scan the three barcode positions in order: charging cable, charger, and phone case. Place the scanner back on the table.",
             # False: MP4 decode (task2_new). True: parquet image columns — point repo_id at predecoded dataset.
             use_parquet_images=True,
-            repo_id="/data/dataset/Robotdataset/Robotdataset/G2_Robot/phone_packaging/task2_new_0520_images",
+            repo_id="/data/dataset/Robotdataset/Robotdataset/G2_Robot/phone_packaging/task2_0520_images",
             assets=AssetsConfig(
                 assets_dir=None,
                 # Norm stats: directory name under assets/<config-name>/ (default), or an absolute path to
                 # the folder that contains norm_stats.json.
-                asset_id="/data/luogz/code/ACoT-VLA/assets/task2_new_0520/norm_stats",
+                asset_id="/data/luogz/code/ACoT-VLA/assets/task2_0520/norm_stats",
             ),
         prompt_map_inject_to_training={
             "packaging_phone_line_real_2": (

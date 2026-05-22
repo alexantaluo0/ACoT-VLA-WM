@@ -4,6 +4,8 @@ import logging
 import time
 import traceback
 
+import numpy as np
+
 from openpi_client import base_policy as _base_policy
 from openpi_client import msgpack_numpy
 import websockets.asyncio.server as _server
@@ -22,6 +24,36 @@ def _format_obs_prompt(obs: dict) -> str:
     if isinstance(prompt, bytes):
         prompt = prompt.decode("utf-8")
     return str(prompt)
+
+
+def _extract_obs_state(obs: dict) -> np.ndarray | None:
+    """Return proprio state vector from common client observation keys."""
+    for key in ("state", "observation.state", "observation/state"):
+        if key not in obs:
+            continue
+        state = obs[key]
+        if hasattr(state, "cpu"):
+            state = state.cpu().numpy()
+        state = np.asarray(state).squeeze()
+        if state.ndim == 1 and state.size > 0:
+            return state
+    return None
+
+
+def _format_obs_gripper_state(obs: dict) -> str:
+    """Format gripper values from raw or 24-dim reordered client state."""
+    state = _extract_obs_state(obs)
+    if state is None:
+        return "gripper state=<missing>"
+
+    parts = [f"state_dim={state.size}"]
+    # Raw G2 observation.state (159-dim): effectors at indices 0/1.
+    if state.size >= 2:
+        parts.append(f"raw[0:2]=({state[0]:.4f}, {state[1]:.4f})")
+    # 24-dim layout after Go2ACOTInputs reorder: grippers at indices 14/15.
+    if state.size >= 16:
+        parts.append(f"reordered[14:16]=({state[14]:.4f}, {state[15]:.4f})")
+    return "gripper " + ", ".join(parts)
 
 
 class WebsocketPolicyServer:
@@ -69,6 +101,7 @@ class WebsocketPolicyServer:
                 start_time = time.monotonic()
                 obs = msgpack_numpy.unpackb(await websocket.recv())
                 logger.info("Client prompt: %s", _format_obs_prompt(obs))
+                logger.info("Client %s", _format_obs_gripper_state(obs))
 
                 infer_time = time.monotonic()
                 action = self._policy.infer(obs)
