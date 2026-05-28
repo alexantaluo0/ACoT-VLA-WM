@@ -63,6 +63,17 @@ def init_logging():
     logger.handlers[0].setFormatter(formatter)
 
 
+def _format_first32(name: str, arr) -> str:
+    vals = np.asarray(jax.device_get(arr)).reshape(-1)[:32]
+    return f"{name}=[{', '.join(f'{v:.4f}' for v in vals)}]"
+
+
+def _log_model_input_sample(batch, pbar, step: int) -> None:
+    observation, actions = batch[0], batch[1]
+    pbar.write(f"Step {step} model input (sample[0]): {_format_first32('state', observation.state[0, :32])}")
+    pbar.write(f"Step {step} model input (sample[0]): {_format_first32('actions[t=0]', actions[0, 0, :32])}")
+
+
 def init_wandb(config: _config.TrainConfig, *, resuming: bool, log_code: bool = False, enabled: bool = True):
     if not enabled:
         wandb.init(mode="disabled")
@@ -377,6 +388,7 @@ def main(config: _config.TrainConfig):
                 reduced_info["loss_action"] = loss_action_val
             info_str = ", ".join(f"{k}={v:.4f}" for k, v in reduced_info.items())
             pbar.write(f"Step {step}: {info_str}")
+            #_log_model_input_sample(batch, pbar, step)
             wandb.log(reduced_info, step=step)
             infos = []
         batch = next(data_iter)

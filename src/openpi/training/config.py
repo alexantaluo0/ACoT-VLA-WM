@@ -2107,12 +2107,12 @@ _CONFIGS = [
             default_prompt="Use the right arm and right gripper to pick up the scanner from the table. Scan the three barcode positions in order: charging cable, charger, and phone case. Place the scanner back on the table.",
             # False: MP4 decode (task2_new). True: parquet image columns — point repo_id at predecoded dataset.
             use_parquet_images=True,
-            repo_id="/data/dataset/Robotdataset/Robotdataset/G2_Robot/phone_packaging/task2_0520_images",
+            repo_id="/data/dataset/Robotdataset/Robotdataset/G2_Robot/phone_packaging/task2_0518_images",
             assets=AssetsConfig(
                 assets_dir=None,
                 # Norm stats: directory name under assets/<config-name>/ (default), or an absolute path to
                 # the folder that contains norm_stats.json.
-                asset_id="/data/luogz/code/ACoT-VLA/assets/task2_0520/norm_stats",
+                asset_id="/data/luogz/code/ACoT-VLA/assets/task2_0518/norm_stats",
             ),
         prompt_map_inject_to_training={
             "packaging_phone_line_real_2": (
@@ -2168,6 +2168,93 @@ _CONFIGS = [
             "/data/luogz/models/openpi-assets/checkpoints/pi05_base/params"
         ),
         num_train_steps=50_000,
+        save_interval=2000 if not os.getenv("DEBUG_MODE", default=False) == "true" else 200,
+        num_workers=24 if not os.getenv("DEBUG_MODE", default=False) == "true" else 1,
+        batch_size=256 if not os.getenv("DEBUG_MODE", default=False) == "true" else 16,
+        freeze_filter=acot_vla.ACOTConfig(paligemma_variant="gemma_2b").get_freeze_filter(
+            freeze_vision=False,
+            freeze_llm=True,
+            freeze_llm_embedder=True,
+            freeze_dual_ae=[False, False],
+        ),
+    ),
+    TrainConfig(
+        name="task4",
+        model=acot_vla.ACOTConfig(
+            coarse_action_horizon=50,
+            action_horizon=50,
+            max_token_len=256,
+            paligemma_variant="gemma_2b",
+            adopt_explicit_action_reasoner=True,
+            adopt_implicit_action_reasoner=True,
+            downsample_based_implicit_extractor=True,
+        ),
+        data=LerobotACOTGo2DataConfig(
+            default_prompt="Use the right arm and right gripper to pick up the scanner to scan the phone body barcode, then use the scanner to scan the bottom barcode of the upper cover and the bottom barcode of the lower cover in sequence, place the scanner back on the table, and finally simulate taking a label from the label machine and sticking it onto the upper cover for 30 seconds.",
+            # False: MP4 decode (task2_new). True: parquet image columns — point repo_id at predecoded dataset.
+            use_parquet_images=True,
+            repo_id="/data/dataset/Robotdataset/Robotdataset/G2_Robot/phone_packaging/task4_0526_images",
+            assets=AssetsConfig(
+                assets_dir=None,
+                # Norm stats: directory name under assets/<config-name>/ (default), or an absolute path to
+                # the folder that contains norm_stats.json.
+                asset_id="/data/luogz/code/ACoT-VLA/assets/task4_0526/norm_stats",
+            ),
+        prompt_map_inject_to_training={
+            "packaging_phone_line_real_4": (
+                "Use the right arm and right gripper to pick up the scanner. "
+                "Scan the three barcode positions in order: the phone body barcode, the bottom barcode of the upper cover, and the bottom barcode of the lower cover. "
+                "Place the scanner back on the table. "
+                "Simulate taking a label from the label machine and sticking it onto the upper cover for 30 seconds.",
+                0.2,
+            ),
+        },
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "top_head": "observation.images.top_head",
+                                "hand_left": "observation.images.hand_left",
+                                "hand_right": "observation.images.hand_right",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "prompt",
+                            "task": "task",
+                            "episode_index": "episode_index",
+                        }
+                    )
+                ]
+            ),
+            base_config=DataConfig(
+                dataloader_sampler="subtask",
+                prompt_from_hl_instruction=True,
+                video_tolerance_s=5,
+                # 1% / 99% 分位归一化（见 transforms.Normalize use_quantiles）
+                use_quantile_norm=True,
+            ),
+            joint_action_shifts=(2, 1),
+            extra_delta_transform=(True, True),
+            # 24-dim action order: arm_l x7, arm_r x7, gripper_l/r, head x3, waist x5; pad to action_dim=32.
+            robot_action_dim=24,
+            state_mask=_transforms.make_bool_mask(-24, 8),
+            action_mask=_transforms.make_bool_mask(-24, 8),
+            # First 14 dims (two 7-DoF arms) use delta; grippers, head, waist (and pad) use absolute.
+            delta_action_mask=_transforms.make_bool_mask(14, -18),
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.ACOTCheckpointWeightLoader(
+            "/data/luogz/code/ACoT-VLA/checkpoints/task4/id04/6000/params"
+        ),
+        num_train_steps=20_000,
         save_interval=2000 if not os.getenv("DEBUG_MODE", default=False) == "true" else 200,
         num_workers=24 if not os.getenv("DEBUG_MODE", default=False) == "true" else 1,
         batch_size=256 if not os.getenv("DEBUG_MODE", default=False) == "true" else 16,

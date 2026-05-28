@@ -135,6 +135,11 @@ class Go2ACOTInputs(transforms.DataTransformFn):
             )
         if state_indices is not None:
             data["state"] = data["state"][state_indices]
+
+            # # 写数据，确认载入state数据是否正确
+            # with open("/tmp/go2_state_debug.log", "a") as f:
+            #     f.write(f"{data['state']}\n")
+
             if len(data["state"]) != 24:
                 raise ValueError(
                     f"Go2ACOTInputs: expected 24-dim state after slicing, got {len(data['state'])}."
