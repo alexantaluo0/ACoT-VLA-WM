@@ -396,6 +396,25 @@ def _create_single_lerobot_dataset(
             dataset,
             [_transforms.PromptFromHighlevelInstruction(dataset_meta.info["instruction_segments"])],
         )
+    if data_config.enable_subgoal_training:
+        from openpi.training.subgoal_dataset import SubgoalFrameDataset
+
+        terminal_prob = (
+            data_config.subgoal_end_prob
+            if data_config.subgoal_end_prob is not None
+            else data_config.subgoal_terminal_prob
+        )
+        dataset = SubgoalFrameDataset(
+            _dataset=dataset,
+            instruction_segments=dataset_meta.info["instruction_segments"],
+            fps=float(dataset_meta.fps),
+            subgoal_image_key=data_config.subgoal_image_key,
+            output_key=data_config.subgoal_output_key,
+            terminal_prob=terminal_prob,
+            wm_in_terminal_prob=data_config.subgoal_wm_in_terminal_prob,
+            future_horizon_s=data_config.subgoal_future_horizon_s,
+            wm_subgoal_root=data_config.subgoal_wm_root,
+        )
     active_video_keys = resolve_lerobot_video_keys_for_data_config(dataset_meta, data_config)
     if active_video_keys is not None:
         skipped = sorted(set(_all_lerobot_video_keys(dataset_meta)) - set(active_video_keys))

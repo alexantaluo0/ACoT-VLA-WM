@@ -7,6 +7,9 @@ import lerobot.common.datasets.lerobot_dataset as lerobot_dataset
 def get_base_dataset(ds):
     if hasattr(ds, "_dataset"):
         return get_base_dataset(ds._dataset)
+    # Legacy field name (older SubgoalFrameDataset wrappers).
+    if hasattr(ds, "dataset") and type(ds).__name__ == "SubgoalFrameDataset":
+        return get_base_dataset(ds.dataset)
     return ds
 
 def sample_subtask(dataset):

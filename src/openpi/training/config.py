@@ -110,6 +110,20 @@ class DataConfig:
 
     prompt_from_hl_instruction: bool = False
 
+    # pi0.7-style training: sample a future/terminal top-head subgoal image within the current subtask.
+    enable_subgoal_training: bool = False
+    # Fraction using terminal subgoal (default 25%); remainder = future uniform in [t, t+horizon].
+    subgoal_terminal_prob: float = 0.25
+    # Back-compat alias; if set via CLI it overrides subgoal_terminal_prob in the data loader.
+    subgoal_end_prob: float | None = None
+    # Within terminal branch only: P(WM step image) vs P(dataset subtask last frame).
+    subgoal_wm_in_terminal_prob: float = 0.5
+    subgoal_future_horizon_s: float = 4.0
+    subgoal_image_key: str = "observation.images.top_head"
+    subgoal_output_key: str = "subgoal_top_head"
+    # World-model subgoals: ``{root}/episode_XXXXXX/step{N}.png``. None = auto under repo ``images/``.
+    subgoal_wm_root: str | None = None
+
     dataloader_sampler: str | None = ''
     # LeRobot video timestamp matching tolerance. Some converted datasets have frame timestamps
     # quantized by one video frame (for example 1 / 30s).
@@ -689,16 +703,22 @@ class LerobotACOTGo2DataConfig(DataConfigFactory):
     # Robot command width after preprocessing (before pad to model action_dim). Legacy datasets: 21.
     robot_action_dim: int = 21
 
+    enable_subgoal_training: bool = False
+
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         # Create data transforms for inputs and outputs
         base_config = self.create_base_config(assets_dirs, model_config)
+        if self.enable_subgoal_training:
+            base_config = dataclasses.replace(base_config, enable_subgoal_training=True)
         data_transforms = _transforms.Group(
             inputs=[go2_policy.Go2ACOTInputs(
                 action_dim=model_config.action_dim,
                 state_mask = self.state_mask,
                 action_mask = self.action_mask,
                 prompt_map_inject_to_training = self.prompt_map_inject_to_training,
+                default_task_prompt=self.default_prompt,
+                enable_subgoal_training=base_config.enable_subgoal_training,
                 acot_action_generation=((model_config.coarse_action_horizon, model_config.action_horizon), self.joint_action_shifts),
             )],
             outputs=[go2_policy.Go2ACOTOutputs(robot_action_dim=self.robot_action_dim)],
@@ -2181,8 +2201,8 @@ _CONFIGS = [
     TrainConfig(
         name="task4",
         model=acot_vla.ACOTConfig(
-            coarse_action_horizon=50,
-            action_horizon=50,
+            coarse_action_horizon=60,
+            action_horizon=60,
             max_token_len=256,
             paligemma_variant="gemma_2b",
             adopt_explicit_action_reasoner=True,
@@ -2191,6 +2211,7 @@ _CONFIGS = [
         ),
         data=LerobotACOTGo2DataConfig(
             default_prompt="Use the right arm and right gripper to pick up the scanner to scan the phone body barcode, then use the scanner to scan the bottom barcode of the upper cover and the bottom barcode of the lower cover in sequence, place the scanner back on the table, and finally simulate taking a label from the label machine and sticking it onto the upper cover for 30 seconds.",
+            enable_subgoal_training=True,
             # False: MP4 decode (task2_new). True: parquet image columns — point repo_id at predecoded dataset.
             use_parquet_images=True,
             repo_id="/data/dataset/Robotdataset/Robotdataset/G2_Robot/phone_packaging/task4_0526_images",
@@ -2217,6 +2238,7 @@ _CONFIGS = [
                                 "top_head": "observation.images.top_head",
                                 "hand_left": "observation.images.hand_left",
                                 "hand_right": "observation.images.hand_right",
+                                "subgoal_top_head": "subgoal_top_head",
                             },
                             "state": "observation.state",
                             "actions": "action",
@@ -2230,6 +2252,13 @@ _CONFIGS = [
             base_config=DataConfig(
                 dataloader_sampler="subtask",
                 prompt_from_hl_instruction=True,
+                enable_subgoal_training=True,
+                subgoal_terminal_prob=0.25,
+                subgoal_wm_in_terminal_prob=0.5,
+                subgoal_wm_root=(
+                    "/data/dataset/Robotdataset/Robotdataset/G2_Robot/phone_packaging/"
+                    "task4_0526_images/images/chunk-000/observation.images.top_head"
+                ),
                 video_tolerance_s=5,
                 # 1% / 99% 分位归一化（见 transforms.Normalize use_quantiles）
                 use_quantile_norm=True,
@@ -2252,7 +2281,7 @@ _CONFIGS = [
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
         weight_loader=weight_loaders.ACOTCheckpointWeightLoader(
-            "/data/luogz/code/ACoT-VLA/checkpoints/task4/id04/6000/params"
+            "/data/luogz/models/openpi-assets/checkpoints/pi05_base/params"
         ),
         num_train_steps=20_000,
         save_interval=2000 if not os.getenv("DEBUG_MODE", default=False) == "true" else 200,

@@ -109,13 +109,17 @@ class Go2ACOTInputs(transforms.DataTransformFn):
     state_mask: np.ndarray | None = None
     action_mask: np.ndarray | None = None
     prompt_map_inject_to_training: dict[str, str] | None = None
+    default_task_prompt: str | None = None
+    enable_subgoal_training: bool = False
 
     EXPECTED_CAMERAS: ClassVar[tuple[str, ...]] = ("top_head", "hand_left", "hand_right")
+    SUBGOAL_CAMERA: ClassVar[str] = "subgoal_top_head"
 
     rename_map = {
         "top_head": "base_0_rgb",
         "hand_left": "left_wrist_0_rgb",
-        "hand_right": "right_wrist_0_rgb"
+        "hand_right": "right_wrist_0_rgb",
+        "subgoal_top_head": "subgoal_0_rgb",
     }
     acot_action_generation: Sequence[Sequence[int]] | None = None
 
@@ -165,7 +169,18 @@ class Go2ACOTInputs(transforms.DataTransformFn):
                 raise ValueError(f"Go2ACOTInputs: unsupported action width {n_a}, expected 40, 24, or 21.")
         return data
     
-    def random_inject_prompt(self, data):
+    def _parse_image(self, img) -> np.ndarray:
+        if isinstance(img, torch.Tensor):
+            img = img.cpu().numpy()
+        if np.issubdtype(img.dtype, np.floating):
+            img = (255 * img).astype(np.uint8)
+        if img.shape[0] == 3:
+            img = np.transpose(img, (1, 2, 0))
+        return img
+
+    def resolve_task_prompt(self, data) -> str:
+        """Episode-level task prompt (with optional injection)."""
+        task_prompt = self.default_task_prompt or ""
         color_episode_pairs_for_task_sort_packages = {
             'white': [
                 0, 9, 11, 15, 18, 19, 22, 34, 39, 41, 49, 52, 55, 62, 66, 68, 69, 73, 74, 81, 90, 96, 111, 120, 123, 125, \
@@ -201,9 +216,9 @@ class Go2ACOTInputs(transforms.DataTransformFn):
                         break
 
             if np.random.rand() < inject_prob:
-                data["prompt"] = default_prompt
-    
-        return data
+                task_prompt = default_prompt
+
+        return task_prompt
 
     def __call__(self, data: dict) -> dict:
         data = self.slice_state_and_action(data)
@@ -211,22 +226,19 @@ class Go2ACOTInputs(transforms.DataTransformFn):
         if self.state_mask is not None:
             state[np.array(self.state_mask)] = 0
 
-        # Parse images to uint8 (H,W,C) since LeRobot automatically stores as float32 (C,H,W)
         images = {}
         for camera in self.EXPECTED_CAMERAS:
-            if camera in data["images"]:
-                img = data["images"][camera]
-                if isinstance(img, torch.Tensor):
-                    img = img.cpu().numpy()
-                if np.issubdtype(img.dtype, np.floating):
-                    img = (255 * img).astype(np.uint8)
-                if img.shape[0] == 3:
-                    img = np.transpose(img, (1, 2, 0))
-                images[self.rename_map[camera]] = img
-            else:
+            if camera not in data["images"]:
                 raise ValueError(f"Camera {camera} not found in data")
+            images[self.rename_map[camera]] = self._parse_image(data["images"][camera])
 
         image_mask = {self.rename_map[camera]: np.True_ for camera in self.EXPECTED_CAMERAS}
+
+        if self.enable_subgoal_training:
+            if self.SUBGOAL_CAMERA not in data["images"]:
+                raise ValueError(f"Subgoal camera {self.SUBGOAL_CAMERA} not found in data")
+            images[self.rename_map[self.SUBGOAL_CAMERA]] = self._parse_image(data["images"][self.SUBGOAL_CAMERA])
+            image_mask[self.rename_map[self.SUBGOAL_CAMERA]] = np.True_
 
         # Prepare inputs dictionary
         inputs = {
@@ -254,11 +266,20 @@ class Go2ACOTInputs(transforms.DataTransformFn):
                 data[key] = transforms.pad_to_dim(data[key], self.action_dim)
                 inputs[key] = data[key]
 
-        if "task" in data: # training
-            data = self.random_inject_prompt(data)
+        if "task" in data:
+            data["_task_prompt"] = self.resolve_task_prompt(data)
+            if not self.enable_subgoal_training and data["_task_prompt"] != (self.default_task_prompt or ""):
+                data["prompt"] = data["_task_prompt"]
 
         if "prompt" in data:
-            inputs["prompt"] = data["prompt"]
+            subtask_prompt = data["prompt"]
+            if not isinstance(subtask_prompt, str):
+                subtask_prompt = subtask_prompt.item()
+            if self.enable_subgoal_training:
+                task_prompt = data.get("_task_prompt", self.default_task_prompt or "")
+                inputs["prompt"] = f"Task: {task_prompt}. Subtask: {subtask_prompt}"
+            else:
+                inputs["prompt"] = subtask_prompt
 
         return inputs
 
