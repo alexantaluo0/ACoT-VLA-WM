@@ -11,6 +11,9 @@
 若转换中断导致个别 episode parquet 缺失，可用 ``--repair-missing`` 从同一套 **video** 输入仅补缺失文件（``--resize`` / ``--image-format`` / ``--jpeg-quality`` 须与首次转换一致）。
 
 保留原有 parquet 表格列（含 action.0..、observation.state.0.. 展开列），仅新增与 meta 中同名的相机 image 列。
+
+当某 episode 的 parquet 行数与各相机 mp4 帧数不一致时，默认取最小长度截断并对齐（stderr 输出一条 WARNING）；
+使用 ``--strict-alignment`` 可恢复为不一致时直接报错。
 """
 
 from __future__ import annotations
@@ -71,14 +74,30 @@ def _encode_image_bytes(
     return buf.getvalue()
 
 
+def _probe_video_frame_count(video_path: Path) -> int:
+    """读取 mp4 帧数（优先 stream 元数据，否则 demux 计数，均不解码像素）。"""
+    container = av.open(str(video_path))
+    try:
+        stream = container.streams.video[0]
+        if stream.frames > 0:
+            return stream.frames
+        count = sum(1 for packet in container.demux(stream) if packet.dts is not None)
+        if count <= 0:
+            raise ValueError(f"无法确定视频帧数: {video_path}")
+        return count
+    finally:
+        container.close()
+
+
 def _decode_encoded_frames(
     video_path: Path,
     *,
     resize: tuple[int, int] | None,
     image_format: str,
     jpeg_quality: int,
+    max_frames: int | None = None,
 ) -> list[dict[str, bytes | None]]:
-    """顺序解码整段 mp4，并立即编码成 datasets.Image 可嵌入的 bytes。"""
+    """顺序解码 mp4，并立即编码成 datasets.Image 可嵌入的 bytes。"""
     frames: list[dict[str, bytes | None]] = []
     container = av.open(str(video_path))
     try:
@@ -93,6 +112,8 @@ def _decode_encoded_frames(
                     "path": None,
                 }
             )
+            if max_frames is not None and len(frames) >= max_frames:
+                break
     finally:
         container.close()
     return frames
@@ -135,6 +156,73 @@ def _format_path(tmpl: str, episode_index: int, chunks_size: int) -> str:
     return tmpl.format(episode_index=episode_index, episode_chunk=ep_chunk)
 
 
+def _resolve_aligned_frame_count(
+    *,
+    num_rows: int,
+    frame_counts: dict[str, int],
+    source_episode_index: int,
+    strict_alignment: bool,
+) -> int:
+    """当 parquet 与视频帧数不一致时，返回对齐后的行数（取各来源的最小值）。"""
+    all_counts = [num_rows, *frame_counts.values()]
+    if len(set(all_counts)) == 1:
+        return num_rows
+
+    mismatches = [f"parquet rows={num_rows}"] + [
+        f"{key} frames={count}" for key, count in frame_counts.items() if count != num_rows
+    ]
+    details = ", ".join(mismatches)
+    if strict_alignment:
+        raise ValueError(f"帧数与 parquet 行数不一致: episode={source_episode_index} {details}")
+
+    aligned = min(all_counts)
+    print(
+        f"WARNING: episode {source_episode_index:06d} 帧数未对齐，将截断到 {aligned} 帧 ({details})",
+        file=sys.stderr,
+        flush=True,
+    )
+    return aligned
+
+
+def _reindex_output_dataset(output_root: Path, data_path_fmt: str, chunks_size: int, info: dict[str, Any]) -> None:
+    """按输出 parquet 实际行数重写全局 index，并同步 episodes.jsonl 的 length / info.total_frames。"""
+    ep_path = output_root / "meta" / "episodes.jsonl"
+    if not ep_path.is_file():
+        return
+
+    episodes = _load_jsonlines(ep_path)
+    episodes.sort(key=lambda row: int(row["episode_index"]))
+    global_index = 0
+    meta_changed = False
+
+    for episode in episodes:
+        episode_index = int(episode["episode_index"])
+        rel = Path(_format_path(data_path_fmt, episode_index, chunks_size))
+        parquet_path = output_root / rel
+        if not parquet_path.is_file():
+            global_index += int(episode.get("length", 0))
+            continue
+
+        table = pq.read_table(parquet_path)
+        num_rows = table.num_rows
+        old_length = int(episode.get("length", num_rows))
+        if old_length != num_rows:
+            episode["length"] = num_rows
+            meta_changed = True
+
+        if "index" in table.schema.names:
+            index_col = pa.array(range(global_index, global_index + num_rows), type=pa.int64())
+            index_field_index = table.schema.get_field_index("index")
+            table = table.set_column(index_field_index, "index", index_col)
+            pq.write_table(table, parquet_path)
+        global_index += num_rows
+
+    if meta_changed:
+        _write_jsonlines(ep_path, episodes)
+    info["total_frames"] = global_index
+    _write_output_info(output_root, info)
+
+
 def _convert_episode(
     *,
     input_root: Path,
@@ -149,23 +237,20 @@ def _convert_episode(
     resize: tuple[int, int] | None,
     image_format: str,
     jpeg_quality: int,
-) -> None:
+    strict_alignment: bool = False,
+) -> int:
     rel_data = _format_path(data_path_fmt, source_episode_index, chunks_size)
     in_parquet = input_root / rel_data
     if not in_parquet.is_file():
         raise FileNotFoundError(in_parquet)
 
     table = pq.read_table(in_parquet)
-    n = table.num_rows
+    num_rows = table.num_rows
 
     col_dict: dict[str, list[Any]] = {name: table.column(name).to_pylist() for name in table.column_names}
-    if "episode_index" in col_dict:
-        col_dict["episode_index"] = [output_episode_index] * n
-    if "frame_index" in col_dict:
-        col_dict["frame_index"] = list(range(n))
-    if "index" in col_dict:
-        col_dict["index"] = list(range(output_start_index, output_start_index + n))
 
+    video_files: dict[str, Path] = {}
+    frame_counts: dict[str, int] = {}
     for vk in video_keys:
         rel = Path(
             video_path_fmt.format(
@@ -177,18 +262,39 @@ def _convert_episode(
         video_file = input_root / rel
         if not video_file.is_file():
             raise FileNotFoundError(video_file)
-        image_frames = _decode_encoded_frames(
+        video_files[vk] = video_file
+        frame_counts[vk] = _probe_video_frame_count(video_file)
+
+    aligned_rows = _resolve_aligned_frame_count(
+        num_rows=num_rows,
+        frame_counts=frame_counts,
+        source_episode_index=source_episode_index,
+        strict_alignment=strict_alignment,
+    )
+    if aligned_rows < num_rows:
+        col_dict = {name: values[:aligned_rows] for name, values in col_dict.items()}
+
+    if "episode_index" in col_dict:
+        col_dict["episode_index"] = [output_episode_index] * aligned_rows
+    if "frame_index" in col_dict:
+        col_dict["frame_index"] = list(range(aligned_rows))
+    if "index" in col_dict:
+        col_dict["index"] = list(range(output_start_index, output_start_index + aligned_rows))
+
+    for vk in video_keys:
+        video_file = video_files[vk]
+        col_dict[vk] = _decode_encoded_frames(
             video_file,
             resize=resize,
             image_format=image_format,
             jpeg_quality=jpeg_quality,
+            max_frames=aligned_rows,
         )
-        if len(image_frames) != n:
+        if len(col_dict[vk]) != aligned_rows:
             raise ValueError(
-                f"帧数与 parquet 行数不一致: key={vk} episode={source_episode_index} "
-                f"frames={len(image_frames)} rows={n} ({video_file})"
+                f"解码帧数与对齐长度不一致: key={vk} episode={source_episode_index} "
+                f"decoded={len(col_dict[vk])} expected={aligned_rows} probed={frame_counts[vk]} ({video_file})"
             )
-        col_dict[vk] = image_frames
 
     features = _features_from_table(table.schema, video_keys)
     ds = Dataset.from_dict(col_dict, features=features)
@@ -197,6 +303,7 @@ def _convert_episode(
     out_parquet = output_root / out_rel
     out_parquet.parent.mkdir(parents=True, exist_ok=True)
     ds.to_parquet(out_parquet)
+    return aligned_rows
 
 
 def _copy_meta_files(input_root: Path, output_root: Path) -> None:
@@ -330,6 +437,7 @@ def convert_dataset(
     overwrite: bool,
     episode_indices: list[int] | None,
     num_workers: int,
+    strict_alignment: bool,
 ) -> None:
     if output_root.exists():
         if not overwrite:
@@ -388,6 +496,7 @@ def convert_dataset(
                 "resize": resize,
                 "image_format": image_format,
                 "jpeg_quality": jpeg_quality,
+                "strict_alignment": strict_alignment,
             }
         )
         output_start_index += num_rows
@@ -419,6 +528,7 @@ def convert_dataset(
                     flush=True,
                 )
 
+    _reindex_output_dataset(output_root, data_path, chunks_size, info_out)
     print(f"Done. Image dataset written to: {output_root}", flush=True)
 
 
@@ -442,6 +552,7 @@ def repair_missing_episodes(
     image_format: str,
     jpeg_quality: int,
     num_workers: int,
+    strict_alignment: bool,
 ) -> None:
     """在已有 image 数据集上补写缺失的 episode parquet（输入须仍为带 mp4 的 video 数据集）。"""
     from lerobot.common.datasets.lerobot_dataset import LeRobotDatasetMetadata
@@ -492,6 +603,7 @@ def repair_missing_episodes(
                 "resize": resize,
                 "image_format": image_format,
                 "jpeg_quality": jpeg_quality,
+                "strict_alignment": strict_alignment,
             }
         )
 
@@ -510,6 +622,8 @@ def repair_missing_episodes(
                     raise RuntimeError(f"repair 失败 episode {job['source_episode_index']:06d}") from exc
                 print(f"repair episode {job['source_episode_index']:06d} ({i}/{len(jobs)})", flush=True)
 
+    info_out = _load_info(output_root)
+    _reindex_output_dataset(output_root, data_path, chunks_size, info_out)
     print(f"repair: 完成，已写入 {len(missing)} 个 parquet。", flush=True)
 
 
@@ -606,6 +720,11 @@ def main(argv: list[str] | None = None) -> int:
         default=1,
         help="并行转换 episode 的进程数。默认 1；视频较多时可设为 8 或 16。",
     )
+    p.add_argument(
+        "--strict-alignment",
+        action="store_true",
+        help="要求 parquet 行数与各相机 mp4 帧数严格一致；默认不一致时截断到最短长度并输出 WARNING。",
+    )
     args = p.parse_args(argv)
 
     hf_home = args.hf_lerobot_home or Path(os.environ.get("HF_LEROBOT_HOME", ""))
@@ -646,6 +765,7 @@ def main(argv: list[str] | None = None) -> int:
             image_format=args.image_format,
             jpeg_quality=args.jpeg_quality,
             num_workers=args.num_workers,
+            strict_alignment=args.strict_alignment,
         )
         validate_image_dataset(out_root, args.output_repo_id)
         return 0
@@ -670,6 +790,7 @@ def main(argv: list[str] | None = None) -> int:
         overwrite=args.overwrite,
         episode_indices=ep_arg,
         num_workers=args.num_workers,
+        strict_alignment=args.strict_alignment,
     )
     validate_image_dataset(out_root, args.output_repo_id)
     return 0

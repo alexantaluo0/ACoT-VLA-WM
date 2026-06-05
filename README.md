@@ -1,10 +1,10 @@
-# ACoT-VLA: Action Chain-of-Thought for Vision-Language-Action Models
+# ACOT-VLA-WM: Action Chain-of-Thought for Vision-Language-Action Models
 [![arXiv](https://img.shields.io/badge/arXiv-2601.11404-b31b1b.svg)](https://arxiv.org/pdf/2601.11404v2)
 [![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Paper-yellow.svg)](https://huggingface.co/papers/2601.11404)
 [![License: CC BY 4.0](https://img.shields.io/badge/License-CC%20BY%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by/4.0/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 
-This is the **official implementation** of [**ACoT-VLA**](https://arxiv.org/abs/2601.11404v2), a novel paradigm designed to bridge the fundamental semantic-kinematic gap in modern robotic policies. By shifting the locus of reasoning from perception to action, ACoT-VLA enables robots to "think" in the language of actions.
+This is the **official implementation** of [**ACOT-VLA-WM**](https://arxiv.org/abs/2601.11404v2), built upon [**ACoT-VLA**](https://arxiv.org/abs/2601.11404v2), a novel paradigm designed to bridge the fundamental semantic-kinematic gap in modern robotic policies. By shifting the locus of reasoning from perception to action, ACOT-VLA-WM enables robots to "think" in the language of actions.
 
 ---
 
@@ -98,8 +98,8 @@ Our method delivers substantial gains in unseen-texture tracks and complex table
 We utilize **uv** to manage the Python environment.
 
 ```bash
-git clone https://github.com/AgibotTech/ACoT-VLA.git
-cd ACoT-VLA
+git clone https://github.com/AgibotTech/ACOT-VLA-WM.git
+cd ACOT-VLA-WM
 git submodule update --init --recursive
 GIT_LFS_SKIP_SMUDGE=1 uv sync
 GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .

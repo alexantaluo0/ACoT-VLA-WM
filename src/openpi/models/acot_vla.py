@@ -16,7 +16,7 @@ from openpi.models.pi0 import posemb_sincos, make_attn_mask
 from openpi.shared import array_typing as at
 import openpi.shared.nnx_utils as nnx_utils
 
-logger = logging.getLogger("ACoT_VLA")
+logger = logging.getLogger("ACOT_VLA_WM")
 
 
 def _positions_from_attn_mask(mask: jax.Array) -> jax.Array:
