@@ -2134,14 +2134,14 @@ _CONFIGS = [
                 # the folder that contains norm_stats.json.
                 asset_id="/data/luogz/code/ACoT-VLA/assets/task2_0518/norm_stats",
             ),
-        prompt_map_inject_to_training={
-            "packaging_phone_line_real_2": (
-                "Use the right arm and right gripper to pick up the scanner from the table. "
-                "Scan the three barcode positions in order: charging cable, charger, and phone case. "
-                "Place the scanner back on the table.",
-                0.2,
-            ),
-        },
+            prompt_map_inject_to_training={
+                "packaging_phone_line_real_2": (
+                    "Use the right arm and right gripper to pick up the scanner from the table. "
+                    "Scan the three barcode positions in order: charging cable, charger, and phone case. "
+                    "Place the scanner back on the table.",
+                    0.2,
+                ),
+            },
             repack_transforms=_transforms.Group(
                 inputs=[
                     _transforms.RepackTransform(
@@ -2221,15 +2221,15 @@ _CONFIGS = [
                 # the folder that contains norm_stats.json.
                 asset_id="/data/luogz/code/ACoT-VLA/assets/task4_0526/norm_stats",
             ),
-        prompt_map_inject_to_training={
-            "packaging_phone_line_real_4": (
-                "Use the right arm and right gripper to pick up the scanner. "
-                "Scan the three barcode positions in order: the phone body barcode, the bottom barcode of the upper cover, and the bottom barcode of the lower cover. "
-                "Place the scanner back on the table. "
-                "Simulate taking a label from the label machine and sticking it onto the upper cover for 30 seconds.",
-                0.2,
-            ),
-        },
+            prompt_map_inject_to_training={
+                "packaging_phone_line_real_4": (
+                    "Use the right arm and right gripper to pick up the scanner. "
+                    "Scan the three barcode positions in order: the phone body barcode, the bottom barcode of the upper cover, and the bottom barcode of the lower cover. "
+                    "Place the scanner back on the table. "
+                    "Simulate taking a label from the label machine and sticking it onto the upper cover for 30 seconds.",
+                    0.2,
+                ),
+            },
             repack_transforms=_transforms.Group(
                 inputs=[
                     _transforms.RepackTransform(
