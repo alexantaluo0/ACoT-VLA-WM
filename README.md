@@ -1,97 +1,34 @@
-# ACOT-VLA-WM: Action Chain-of-Thought for Vision-Language-Action Models
+# ACOT-VLA-WM: Precise Robotic Subgoal Generation and Execution
+
+[![Project Page](https://img.shields.io/badge/Project-Page-blue.svg)](https://www.acotvla-wm.xyz)
 [![arXiv](https://img.shields.io/badge/arXiv-2601.11404-b31b1b.svg)](https://arxiv.org/pdf/2601.11404v2)
-[![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Paper-yellow.svg)](https://huggingface.co/papers/2601.11404)
 [![License: CC BY 4.0](https://img.shields.io/badge/License-CC%20BY%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by/4.0/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 
-This is the **official implementation** of [**ACOT-VLA-WM**](https://arxiv.org/abs/2601.11404v2), built upon [**ACoT-VLA**](https://arxiv.org/abs/2601.11404v2), a novel paradigm designed to bridge the fundamental semantic-kinematic gap in modern robotic policies. By shifting the locus of reasoning from perception to action, ACOT-VLA-WM enables robots to "think" in the language of actions.
+**ACOT-VLA-WM** is an improved variant of [**ACoT-VLA**](https://arxiv.org/abs/2601.11404v2) that integrates a **Predictive World Model** into the Action Chain-of-Thought framework, enabling precise robotic subgoal generation and execution on long-horizon, high-precision manipulation tasks.
+
+> 📖 Full technical details, demos, and evaluation videos: **[acotvla-wm.xyz](https://www.acotvla-wm.xyz)**
 
 ---
 
-## 🌟 Overview
+## Overview
 
-Existing VLA models often rely on indirect reasoning like sub-task prediction (language) or goal image synthesis (vision), which lack the granular information required for precise execution. We posit that the most effective form of reasoning is one that **deliberates directly in the action space**.
+Foundational robot models need not only semantic comprehension of task objectives, but also concrete instantiations of intermediate subgoals throughout training and inference. **ACOT-VLA-WM** addresses this by deeply fusing the main ACoT-VLA model with a predictive world model: the world model forecasts multi-view future frames and embeds them as visual subgoals into the main model's training, significantly improving physical fault tolerance and action precision.
 
-### Key Components:
+### Key Improvements over ACoT-VLA
 
-* **Explicit Action Reasoner (EAR):** A light-weight Transformer that synthesizes coarse-grained motion trajectories to provide direct motion cues.
+* **World Model Integration:** A finetuned predictive world model (BAGEL-based) generates multi-view future subgoal images that are embedded into ACoT-VLA training prompts.
+* **Mixed Subgoal Sampling (75% / 12.5% / 12.5%):**
+  - **75%** — uniformly sample a future frame 0–4 seconds ahead, improving robustness to execution delay and speed perturbations.
+  - **12.5%** — use the sub-step terminal frame as subgoal.
+  - **12.5%** — use world-model-generated future frames as subgoal.
+* **Robust Long-Horizon Execution:** On 5 industrial manipulation scenarios (10 rollouts each), baseline ACoT-VLA achieves **80%** overall success rate, while ACOT-VLA-WM reaches **100%**, including challenging tasks such as picking up a barcode scanner and scanning 5 QR codes on a marble table.
 
-* **Implicit Action Reasoner (IAR):** Extracts latent action priors from the internal representations of the VLM backbone using cross-attention modeling.
-
-* **Action Chain-of-Thought (ACoT):** Together, EAR and IAR co-form an Action Chain-of-Thought, a reasoning paradigm where the deliberative process is formulated as structured action intents, enabling grounded and long-horizon policy learning.![framework](docs/framework.png)
-
----
-
-## News 
-
-- 🚀🚀 **The [test server](https://agibot-world.com/challenge2026/reasoning2action/quick-start) of AgiBot World Challenge @ ICRA 2026  is available now.**
-
-- 🔥🔥 The minimal version of training code for [AgiBot World Challenge @ ICRA 2026](https://agibot-world.com/challenge2026) - Reasoning to Action track have been released.
-
-- 🚀🚀 The training datasets of [AgiBot World Challenge @ ICRA 2026 - Reasoning to Action track](https://huggingface.co/datasets/agibot-world/AgiBotWorldChallenge-2026/tree/main/Reasoning2Action-Sim) have been released.
+Core training logic lives in `src/openpi/training/subgoal_dataset.py` and `src/openpi/training/sampler.py`, which dynamically schedule world-model predictions and real future frames during training.
 
 ---
 
-## 🏆 ICRA 2026 Baseline (AgiBot World Challenge)
-
-This repository serves as the **official baseline implementation** for the **AgiBot World Challenge @ ICRA 2026**.
-
-The competition configuration can be found at:
-
-* **Config Path**: `src/openpi/training/config.py`
-* **Config Name**: `acot_icra_simulation_challenge_reasoning_to_action`
-
----
-
-## 📊 Performance Benchmarks
-
-ACoT-VLA achieves state-of-the-art performance on multiple simulation benchmarks and exhibits superior robustness under distribution shifts.
-
-### 1. LIBERO Benchmark
-
-ACoT-VLA demonstrates significant improvements, particularly in the **LIBERO-Long** suite, by reducing ambiguity in mapping observations to actions.
-
-| Method | Spatial | Object | Goal | Long | **Avg.** |
-| --- | --- | --- | --- | --- | --- |
-| $\pi_0$ | 96.8 | 98.8 | 95.8 | 85.2 | 94.1 |
-| $\pi_{0.5}$ | 98.8 | 98.2 | 98.0 | 92.4 | 96.9 |
-| **ACoT-VLA (Frozen)** | **99.4** | **99.6** | 98.8 | 96.0 | **98.5** |
-| **ACoT-VLA** | 98.6 | 99.0 | **99.4** | **97.0** | **98.5** |
-
-> *Note: Models are trained on the LIBERO dataset. "Frozen" indicates the LLM backbone is frozen during training. All metrics are average success rates (%). The best results are highlighted in **bold**.*
-
-### 2. LIBERO-Plus Robustness Evaluation
-
-ACoT-VLA shows pronounced robustness under challenging perturbations like camera-viewpoint shifts and sensor noise.
-
-| Setting | Method | Camera | Robot | Language | Light | Background | Noise | Layout | **Avg.** |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| **Zero-Shot** | $\pi_0^*$ | 61.0 | 40.8 | 63.5 | 89.3 | 84.1 | 80.1 | 76.4 | 69.4 |
-| | $\pi_{0.5}^*$ | **75.8** | 79.4 | 83.3 | 95.5 | 95.0 | **89.6** | 87.0 | 85.7 |
-| | **ACoT-VLA (Frozen)** | 68.9 | 80.3 | 84.1 | 95.6 | 93.1 | 81.5 | **88.3** | 83.6 |
-| | **ACoT-VLA** | 72.6 | **82.6** | **87.5** | **97.7** | **96.5** | 87.8 | 88.1 | **86.6** |
-| **SFT** | $\pi_0$ (Frozen) | 79.6 | 21.1 | 72.5 | 84.7 | 86.2 | 68.3 | 69.4 | 67.4 |
-| | $\pi_{0.5}$ (Frozen) | 70.3 | 41.7 | **81.1** | **97.3** | 94.6 | 71.8 | 84.9 | 75.7 |
-| | **ACoT-VLA (Frozen)** | 91.2 | 62.5 | 80.3 | 95.1 | 91.5 | 88.3 | 84.9 | 84.1 |
-| | **ACoT-VLA** | **96.6** | **70.4** | 79.7 | 95.1 | **97.1** | **95.9** | **85.0** | **88.0** |
-
-> *Note: Methods under **Zero-Shot** are trained on LIBERO and directly evaluated on LIBERO-Plus. **SFT** (Supervised Fine-Tuning) denotes models trained on the LIBERO-Plus training set. An asterisk (\*) denotes results reproduced using officially released checkpoints. "Frozen" indicates the LLM backbone is frozen during training. The best results are highlighted in **bold**.*
-
-### 3. VLABench
-
-Our method delivers substantial gains in unseen-texture tracks and complex tabletop scenarios. Comparison based on **Intention Score (IS)** and **Progress Score (PS)**.
-
-| Method | In-dist. (IS/PS) | Category (IS/PS) | Commonsense (IS/PS) | Instruction (IS/PS) | Texture (IS/PS) | **Avg. (IS/PS)** |
-| --- | --- | --- | --- | --- | --- | --- |
-| $\pi_0$ (Frozen) | 67.8 / 62.7 | 44.0 / 33.6 | 54.9 / **43.0** | **58.0** / 38.7 | 50.6 / 42.5 | 55.0 / 44.1 |
-| $\pi_{0.5}$ (Frozen) | 75.0 / 60.8 | 49.6 / 35.3 | **57.5** / 41.6 | 57.1 / 30.3 | 62.0 / 47.4 | 60.2 / 43.1 |
-| **ACoT-VLA (Frozen)** | **79.8 / 66.1** | **54.1 / 38.9** | 52.3 / 37.8 | 56.8 / **39.6** | **74.6 / 54.6** | **63.5 / 47.4** |
-
-> *Note: "Frozen" indicates that the LLM backbone is frozen during training. The best results are highlighted in **bold**.*
-
----
-
-## 🚀 Get Started
+## Get Started
 
 ### 1. Installation
 
@@ -103,49 +40,65 @@ cd ACOT-VLA-WM
 git submodule update --init --recursive
 GIT_LFS_SKIP_SMUDGE=1 uv sync
 GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
-
 ```
 
-### 2. Dataset Preparation
+### 2. G2 Robot: Video Data → Images（加速 > 2倍训练速度）
 
-Datasets are processed into the **LeRobot format**.
+Convert LeRobot video datasets to parquet-embedded image datasets for faster training I/O.
 
 ```bash
-python examples/libero/convert_libero_data_to_lerobot.py
+export HF_LEROBOT_HOME=/data/dataset/Robotdataset/Robotdataset/G2_Robot/phone_packaging
 
+uv run python scripts/predecode_lerobot_videos_to_images.py \
+  --input-repo-id task4_0526 \
+  --output-repo-id task4_0526_images \
+  --image-format jpeg \
+  --jpeg-quality 98 \
+  --num-workers 16 \
+  --overwrite
 ```
 
-### 3. Training & Inference
-
-Follow the standardized pipeline to compute normalization statistics and launch training.
+### 3. Compute Normalization Statistics
 
 ```bash
-# Compute stats
-uv run scripts/compute_norm_stats.py --config-name <CONFIG_NAME>
+uv run scripts/compute_norm_stats.py \
+  --config-name packaging_phone_line_real_2 \
+  --robot-action-dim=24
+```
 
-# Start training
-bash scripts/train.sh <CONFIG_NAME> <EXP_NAME>
+### 4. Model Training
 
-# Launch policy server
-bash scripts/server.sh <GPU_ID> <PORT>
+```bash
+# Load image-based dataset for training
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.6
 
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 uv run scripts/train.py G2_Robot_demo \
+  --exp-name=id02 \
+  --data.use-parquet-images \
+  --batch-size 64 \
+  --num-workers 16 \
+  --overwrite
+```
+
+### 5. Model Deployment
+
+```bash
+export CUDA_VISIBLE_DEVICES=4,5,6,7
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.5
+
+GIT_LFS_SKIP_SMUDGE=1 uv run python scripts/serve_policy.py \
+  --env G2SIM \
+  --port 8067 \
+  policy:checkpoint \
+  --policy.config task4 \
+  --policy.dir "/data/luogz/code/ACoT-VLA/checkpoints/task4/id07/19999"
 ```
 
 ---
 
-## 📅 TODO List
+## Citation
 
-* [x] Release core EAR and IAR training modules.
-* [x] Release inference code.
-* [x] Training configurations for **LIBERO**, **LIBERO-Plus**, and **VLABench**.
-* [x] Official baseline for **AGIBot ICRA Simulation Challenge**.
-* [ ] Add training configurations for **CALVIN**.
-* [ ] Add training configurations for **RoboCasa**.
-* [ ] Release model checkpoints.
-
----
-
-## 📜 Citation
+If you use ACoT-VLA or ACOT-VLA-WM in your research, please cite:
 
 ```bibtex
 @article{zhong2026acot,
@@ -154,9 +107,8 @@ bash scripts/server.sh <GPU_ID> <PORT>
   journal={arXiv preprint arXiv:2601.11404},
   year={2026}
 }
-
 ```
 
-## 🙏 Acknowledgements
+## Acknowledgements
 
-This repo is built upon the [OpenPI](https://github.com/Physical-Intelligence/openpi) framework. We sincerely thank the authors for their contributions to the community.
+This repo is built upon the [OpenPI](https://github.com/Physical-Intelligence/openpi) framework and the [ACoT-VLA](https://arxiv.org/abs/2601.11404v2) codebase. We sincerely thank the authors for their contributions to the community.
