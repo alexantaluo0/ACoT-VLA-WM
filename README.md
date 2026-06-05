@@ -96,18 +96,14 @@ GIT_LFS_SKIP_SMUDGE=1 uv run python scripts/serve_policy.py \
 
 ---
 
-## Citation
 
-If you use ACoT-VLA or ACOT-VLA-WM in your research, please cite:
+## How to Train World Model?
 
-```bibtex
-@article{zhong2026acot,
-  title={ACoT-VLA: Action Chain-of-Thought for Vision-Language-Action Models},
-  author={Zhong, Linqing and Liu, Yi and Wei, Yifei and Xiong, Ziyu and Yao, Maoqing and Liu, Si and Ren, Guanghui},
-  journal={arXiv preprint arXiv:2601.11404},
-  year={2026}
-}
-```
+ACOT-VLA-WM relies on a finetuned predictive world model to generate multi-view future subgoal images. For world model training and finetuning, see the companion repository:
+
+**[BAGEL-WM](https://github.com/alexantaluo0/BAGEL-WM)**
+
+
 
 ## Acknowledgements
 
