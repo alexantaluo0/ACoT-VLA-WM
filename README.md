@@ -42,7 +42,7 @@ GIT_LFS_SKIP_SMUDGE=1 uv sync
 GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
 ```
 
-### 2. G2 Robot: Video Data → Images（加速 > 2倍训练速度）
+### 2. G2 Robot: Video Data → Images（>2× Faster Model Training）
 
 Convert LeRobot video datasets to parquet-embedded image datasets for faster training I/O.
 
@@ -50,8 +50,8 @@ Convert LeRobot video datasets to parquet-embedded image datasets for faster tra
 export HF_LEROBOT_HOME=/data/dataset/Robotdataset/Robotdataset/G2_Robot/phone_packaging
 
 uv run python scripts/predecode_lerobot_videos_to_images.py \
-  --input-repo-id task4_0526 \
-  --output-repo-id task4_0526_images \
+  --input-repo-id video_data \
+  --output-repo-id images_data \
   --image-format jpeg \
   --jpeg-quality 98 \
   --num-workers 16 \
@@ -62,7 +62,7 @@ uv run python scripts/predecode_lerobot_videos_to_images.py \
 
 ```bash
 uv run scripts/compute_norm_stats.py \
-  --config-name packaging_phone_line_real_2 \
+  --config-name acot-vla-wm-task \
   --robot-action-dim=24
 ```
 
@@ -72,7 +72,7 @@ uv run scripts/compute_norm_stats.py \
 # Load image-based dataset for training
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.6
 
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 uv run scripts/train.py G2_Robot_demo \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 uv run scripts/train.py acot-vla-wm-task \
   --exp-name=id02 \
   --data.use-parquet-images \
   --batch-size 64 \
@@ -90,8 +90,8 @@ GIT_LFS_SKIP_SMUDGE=1 uv run python scripts/serve_policy.py \
   --env G2SIM \
   --port 8067 \
   policy:checkpoint \
-  --policy.config task4 \
-  --policy.dir "/data/luogz/code/ACoT-VLA/checkpoints/task4/id07/19999"
+  --policy.config acot-vla-wm-task \
+  --policy.dir "/data/code/ACoT-VLA/checkpoints/acot-vla-wm-task/id01/20000"
 ```
 
 ---
